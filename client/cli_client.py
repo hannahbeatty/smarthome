@@ -5,8 +5,8 @@ import sys
 import threading
 import queue
 
-HOST = 'localhost'
-PORT = 8765
+HOST = '18.119.116.224'
+PORT = 12345
 
 
 broadcast_queue = queue.Queue()
