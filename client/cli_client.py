@@ -1,28 +1,210 @@
 import websocket
 import json
+import sys
 
 HOST = 'localhost'
 PORT = 8765
 
+# Terminal colors for better UI
+class Colors:
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+def print_success(message):
+    print(f"{Colors.GREEN}[SUCCESS] {message}{Colors.ENDC}")
+
+def print_error(message):
+    print(f"{Colors.RED}[ERROR] {message}{Colors.ENDC}")
+
+def print_info(message):
+    print(f"{Colors.BLUE}[INFO] {message}{Colors.ENDC}")
+
+def print_warning(message):
+    print(f"{Colors.YELLOW}[WARNING] {message}{Colors.ENDC}")
+
 def send_and_print(ws, message):
     ws.send(json.dumps(message))
     response = ws.recv()
-    print("[RECEIVED]", response)
-    return json.loads(response)
-
+    
+    try:
+        parsed_response = json.loads(response)
+        
+        # Handle error responses
+        if parsed_response.get("status") == "error":
+            print_error(parsed_response.get("message", "Unknown error"))
+            return parsed_response
+        
+        # Handle house state responses
+        if parsed_response.get("type") == "house_state":
+            print_info(f"House ID: {parsed_response.get('house_id')} - {parsed_response.get('name', 'Unnamed')}")
+            
+            # Print rooms
+            rooms = parsed_response.get("state", {}).get("rooms", {})
+            print_info(f"Rooms ({len(rooms)}):")
+            for room_id, room_data in rooms.items():
+                print(f"  Room {room_id}: {room_data.get('name')} - {len(room_data.get('devices', {}))} devices")
+            
+            # Print alarm if present
+            if "alarm" in parsed_response.get("state", {}):
+                alarm = parsed_response["state"]["alarm"]
+                is_armed = alarm["status"]["is_armed"]
+                is_triggered = alarm["status"]["is_alarm"]
+                print_info(f"Alarm: {'ARMED' if is_armed else 'Disarmed'}{' [TRIGGERED]' if is_triggered else ''}")
+            
+            return parsed_response
+        
+        # Handle room state responses
+        elif parsed_response.get("type") == "room_state":
+            room_id = parsed_response.get("room_id")
+            state = parsed_response.get("state", {})
+            
+            print_info(f"Room {room_id}: {state.get('name')}")
+            
+            # Print devices
+            devices = state.get("devices", {})
+            print_info(f"Devices ({len(devices)}):")
+            for device_id, device_data in devices.items():
+                device_type = device_data.get("type", "Unknown")
+                status = device_data.get("status", {})
+                
+                if device_type == "Lamp" or device_type == "CeilingLight":
+                    print(f"  {device_type} {device_id}: {'ON' if status.get('on') else 'OFF'}, " +
+                          f"Shade: {status.get('shade')}%, Color: {status.get('color')}")
+                elif device_type == "Lock":
+                    print(f"  Lock {device_id}: {'UNLOCKED' if status.get('is_unlocked') else 'LOCKED'}")
+                elif device_type == "Blinds":
+                    position = 'Up' if status.get('is_up') else 'Down'
+                    openness = 'Open' if status.get('is_open') else 'Closed'
+                    print(f"  Blinds {device_id}: {position}, {openness}")
+            
+            return parsed_response
+            
+        # Handle device status response
+        elif parsed_response.get("type") == "device_status":
+            device_id = parsed_response.get("device_id")
+            device_type = parsed_response.get("device_type")
+            status = parsed_response.get("status", {})
+            
+            print_info(f"Device {device_id} ({device_type}):")
+            
+            if device_type == "Lamp" or device_type == "CeilingLight":
+                print(f"  Status: {'ON' if status.get('on') else 'OFF'}")
+                print(f"  Brightness: {status.get('shade')}%")
+                print(f"  Color: {status.get('color')}")
+            elif device_type == "Lock":
+                print(f"  Status: {'UNLOCKED' if status.get('is_unlocked') else 'LOCKED'}")
+                print(f"  Failed Attempts: {status.get('failed_attempts', 0)}")
+            elif device_type == "Blinds":
+                print(f"  Position: {'Up' if status.get('is_up') else 'Down'}")
+                print(f"  State: {'Open' if status.get('is_open') else 'Closed'}")
+            elif device_type == "Alarm":
+                print(f"  Armed: {'Yes' if status.get('is_armed') else 'No'}")
+                print(f"  Triggered: {'Yes' if status.get('is_alarm') else 'No'}")
+                print(f"  Threshold: {status.get('threshold')}")
+            
+            return parsed_response
+            
+        # Handle device group status
+        elif parsed_response.get("type") == "device_group_status":
+            device_type = parsed_response.get("device_type")
+            devices = parsed_response.get("devices", {})
+            
+            print_info(f"{device_type} devices ({len(devices)}):")
+            
+            for device_id, device_data in devices.items():
+                room_id = device_data.get("room_id")
+                status = device_data.get("status", {})
+                
+                if device_type == "Lamp" or device_type == "CeilingLight":
+                    print(f"  {device_type} {device_id} (Room {room_id}): " +
+                          f"{'ON' if status.get('on') else 'OFF'}, " +
+                          f"Shade: {status.get('shade')}%, " + 
+                          f"Color: {status.get('color')}")
+                elif device_type == "Lock":
+                    print(f"  Lock {device_id} (Room {room_id}): " +
+                          f"{'UNLOCKED' if status.get('is_unlocked') else 'LOCKED'}")
+                elif device_type == "Blinds":
+                    position = 'Up' if status.get('is_up') else 'Down'
+                    openness = 'Open' if status.get('is_open') else 'Closed'
+                    print(f"  Blinds {device_id} (Room {room_id}): {position}, {openness}")
+            
+            return parsed_response
+            
+        # Handle device list responses
+        elif parsed_response.get("type") == "device_list":
+            scope = parsed_response.get("scope")
+            devices = parsed_response.get("devices", [])
+            
+            if scope == "house":
+                print_info(f"All devices in house ({len(devices)}):")
+                for device in devices:
+                    print(f"  {device.get('type')} {device.get('device_id')} - Room: {device.get('room_id', 'N/A')}")
+            
+            elif scope == "room":
+                room_id = parsed_response.get("room_id")
+                room_name = parsed_response.get("room_name")
+                print_info(f"Devices in Room {room_id} - {room_name} ({len(devices)}):")
+                for device in devices:
+                    print(f"  {device.get('type')} {device.get('device_id')}")
+            
+            elif scope == "group":
+                device_type = parsed_response.get("device_type")
+                print_info(f"{device_type} devices ({len(devices)}):")
+                for device in devices:
+                    print(f"  {device_type} {device.get('device_id')} - Room: {device.get('room_id', 'N/A')}")
+            
+            return parsed_response
+        
+        # Handle standard success messages
+        elif "status" in parsed_response and parsed_response["status"] == "success":
+            # Check if there's a specific message
+            if "message" in parsed_response:
+                print_success(parsed_response["message"])
+            else:
+                print_success("Command executed successfully")
+                
+            # If there's additional state info, show it
+            if "device_state" in parsed_response:
+                device_type = parsed_response.get("device_type", "Device")
+                device_id = parsed_response.get("device_id")
+                state = parsed_response["device_state"]
+                
+                print_info(f"{device_type} {device_id} state:")
+                for key, value in state.items():
+                    if key != "device_id":  # Skip redundant info
+                        print(f"  {key}: {value}")
+            
+            return parsed_response
+        
+        # Default case: just print the raw response
+        else:
+            print(f"[RECEIVED] {response}")
+            return parsed_response
+        
+    except json.JSONDecodeError:
+        print(f"[RECEIVED] {response}")
+        return {"status": "error", "message": "Invalid response format"}
+    
 def login(ws):
+    print_info("Please log in to the Smart Home System")
     while True:
         username = input("Username: ")
         password = input("Password: ")
         message = {"command": "login", "username": username, "password": password}
         response = send_and_print(ws, message)
         if response.get("status") == "success":
-            print("Login successful.")
+            print_success(f"Logged in as {username}")
             return response
-        print("Login failed. Try again.\n")
+        print_error("Login failed. Please try again.\n")
 
 def join_house(ws, houses):
-    print("\nAvailable Houses:")
+    print_info("\nAvailable Houses:")
     for h in houses:
         print(f"  ID {h['id']}: {h['name']} (Role: {h['role']})")
     while True:
@@ -30,11 +212,16 @@ def join_house(ws, houses):
             house_id = int(input("Enter house ID to join: "))
             response = send_and_print(ws, {"command": "join_house", "house_id": house_id})
             if response.get("status") == "success":
-                print(f"Joined house {house_id}\n")
-                return house_id
+                # Find the house to get the role
+                for h in houses:
+                    if h['id'] == house_id:
+                        role = h['role']
+                        print_success(f"Joined house {house_id} with role: {role}")
+                        return house_id, role
+                return house_id, "unknown"
         except ValueError:
-            print("Invalid input.")
-        print("Failed to join house. Try again.\n")
+            print_error("Invalid input. Please enter a numeric ID.")
+        print_error("Failed to join house. Try again.\n")
 
 def get_action_params(action, params_list):
     """
@@ -58,7 +245,7 @@ def get_action_params(action, params_list):
     # Parse parameters from input
     for p in params_list:
         if '=' not in p:
-            print(f"[ERROR] Parameter '{p}' is not in the format 'name=value'")
+            print_error(f"Parameter '{p}' is not in the format 'name=value'")
             return None
             
         k, v = p.split('=', 1)
@@ -68,54 +255,114 @@ def get_action_params(action, params_list):
     required_params = action_params[action]["required"]
     for param in required_params:
         if param not in params:
-            print(f"[ERROR] Action '{action}' requires parameter '{param}'")
-            print(f"Example: action {action} <room_id> <device_id> {param}=<value>")
+            print_error(f"Action '{action}' requires parameter '{param}'")
+            print_info(f"Example: action {action} <room_id> <device_id> {param}=<value>")
             return None
     
     # Check for unknown parameters
     all_valid_params = required_params + action_params[action]["optional"]
     for param in params:
         if param not in all_valid_params:
-            print(f"[WARNING] Parameter '{param}' is not recognized for action '{action}'")
+            print_warning(f"Parameter '{param}' is not recognized for action '{action}'")
             # Continue anyway, just warn the user
     
     return params
 
 
-def command_loop(ws, house_id):
-    HELP_TEXT = """
-SmartHome CLI Client Help
-=========================
+def show_menu(role):
+    """Show appropriate menu based on user role"""
+    
+    # Common menu items for all roles
+    common_menu = f"""
+{Colors.HEADER}SmartHome CLI Client - {role.upper()} ROLE{Colors.ENDC}
 
-Available Commands:
-------------------
+{Colors.BOLD}VIEWING COMMANDS (Available to all users):{Colors.ENDC}
+  help                        → Show this help message
+  house_status                → View full house state
+  room_status <room_id>       → View specific room state
+  device_status <room_id> <device_id> → View a specific device
+  group_status <device_type>  → View status of all devices of a type
+  
+  list_devices                → List all devices in house (minimal info)
+  list_room <room_id>         → List all devices in a room (minimal info)
+  list_type <device_type>     → List all devices of a type (minimal info)
+"""
 
-CORE COMMANDS:
+    # Control menu items for regular and admin users
+    control_menu = f"""
+{Colors.BOLD}CONTROL COMMANDS (Regular and Admin only):{Colors.ENDC}
+  action <action> <room_id> <device_id> [<param>=<value>] → Act on device
+  group_action <device_type> <action> [<param>=<value>] → Act on all devices of type
+"""
+
+    # Admin menu items
+    admin_menu = f"""
+{Colors.BOLD}ADMIN COMMANDS (Admin only):{Colors.ENDC}
+  add_room <name>             → Add a new room to the house
+  add_device <room_id> <type> [attr=value ...] → Add a device to a room
+  del_room <room_id>          → Delete a room and all its devices
+  del_device <room_id> <device_id> → Delete a specific device
+"""
+
+    # Other commands for all roles
+    other_menu = f"""
+{Colors.BOLD}OTHER COMMANDS:{Colors.ENDC}
+  raw                         → Send raw JSON
+  exit                        → Exit
+
+Type 'help' for more detailed information.
+"""
+
+    # Display appropriate menu based on role
+    print(common_menu)
+    if role in ["regular", "admin"]:
+        print(control_menu)
+    if role == "admin":
+        print(admin_menu)
+    print(other_menu)
+
+
+def get_detailed_help(role):
+    """Return detailed help text based on user role"""
+    
+    # Common help for all roles
+    common_help = f"""
+{Colors.HEADER}SmartHome CLI Client Help - {role.upper()} ROLE{Colors.ENDC}
+
+{Colors.BOLD}VIEWING COMMANDS (Available to all users):{Colors.ENDC}
   help                         → Display this help message
   house_status                → View full house state
   room_status <room_id>       → View specific room state
   device_status <room_id> <device_id> → View a specific device
   group_status <device_type>  → View status of all devices of a type
   
-LISTING COMMANDS:
   list_devices                → List all devices in house (minimal info)
   list_room <room_id>         → List all devices in a room (minimal info)
   list_type <device_type>     → List all devices of a type (minimal info)
-  
-ACTION COMMANDS:
+"""
+
+    # Control commands for regular and admin
+    control_help = f"""
+{Colors.BOLD}CONTROL COMMANDS (Regular and Admin only):{Colors.ENDC}
   action <action> <room_id> <device_id> [<param>=<value>] → Act on device
   group_action <device_type> <action> [<param>=<value>] → Act on all devices of type
-  
-OTHER COMMANDS:
-  raw                         → Send raw JSON
-  exit                        → Exit
+"""
 
-Device Types:
-------------
+    # Admin commands
+    admin_help = f"""
+{Colors.BOLD}ADMIN COMMANDS (Admin only):{Colors.ENDC}
+  add_room <name>               → Add a new room to the house
+  add_device <room_id> <type> [attr=value ...] → Add a device to a room
+  del_room <room_id>           → Delete a room and all its devices
+  del_device <room_id> <device_id> → Delete a specific device
+"""
+
+    # Device types and actions
+    devices_help = f"""
+{Colors.BOLD}Device Types:{Colors.ENDC}
   Lamp, CeilingLight, Lock, Blinds, Alarm
 
-Available Actions by Device Type:
--------------------------------
+{Colors.BOLD}Available Actions by Device Type:{Colors.ENDC}
   Lamp/CeilingLight:
     - toggle    : Toggle light on/off
     - on        : Turn light on
@@ -141,12 +388,29 @@ Available Actions by Device Type:
     - disarm    : Disarm the alarm
     - trigger   : Trigger the alarm manually
     - stop      : Stop the alarm
+"""
 
-Examples:
---------
+    # Device types for adding (admin only)
+    admin_devices_help = f"""
+{Colors.BOLD}Device Types for Adding:{Colors.ENDC}
+  lamp, ceiling_light, lock, blinds
+
+{Colors.BOLD}Device Attributes:{Colors.ENDC}
+  lamp/ceiling_light: on=true/false shade=0-100 color=red/blue/etc.
+  lock: code=1234,5678 is_unlocked=true/false
+  blinds: is_up=true/false is_open=true/false
+"""
+
+    # Examples
+    examples_help = f"""
+{Colors.BOLD}Examples:{Colors.ENDC}
   list_devices
   room_status 1
   device_status 1 2
+"""
+
+    # Control examples (for regular and admin)
+    control_examples = f"""
   action toggle 1 2
   action on 1 2
   action off 1 2
@@ -158,31 +422,50 @@ Examples:
   group_status Lamp
   group_action Lamp off
 """
-    print("""
-Available Commands:
-  help                        → Show this help message
-  house_status                → View full house state
-  room_status <room_id>       → View specific room state
-  device_status <room_id> <device_id> → View a specific device
-  group_status <device_type>  → View status of all devices of a type
-  
-  list_devices                → List all devices in house (minimal info)
-  list_room <room_id>         → List all devices in a room (minimal info)
-  list_type <device_type>     → List all devices of a type (minimal info)
-  
-  action <action> <room_id> <device_id> [<param>=<value>] → Act on device
-  group_action <device_type> <action> [<param>=<value>] → Act on all devices of type
-  raw                         → Send raw JSON
-  exit                        → Exit
 
-Action Parameters Guide:
-  dim: requires level=<0-100>
-  color: requires color=<color_name> (valid: red, green, blue, white, yellow, purple, orange)
-  unlock: requires code=<unlock_code>
-""")
+    # Admin examples
+    admin_examples = f"""
+  add_room Living Room
+  add_device 1 lamp on=true color=white
+  add_device 1 ceiling_light shade=80
+  add_device 1 lock code=1234,5678,9012
+  add_device 1 blinds is_up=true
+  del_device 1 3
+  del_room 2
+"""
+
+    # Build help text based on role
+    help_text = common_help
+    
+    if role in ["regular", "admin"]:
+        help_text += control_help
+    
+    if role == "admin":
+        help_text += admin_help
+    
+    help_text += devices_help
+    
+    if role == "admin":
+        help_text += admin_devices_help
+    
+    help_text += examples_help
+    
+    if role in ["regular", "admin"]:
+        help_text += control_examples
+    
+    if role == "admin":
+        help_text += admin_examples
+    
+    return help_text
+
+
+def command_loop(ws, house_id, role):
+    # Show the appropriate menu based on user role
+    show_menu(role)
+    
     while True:
         try:
-            parts = input("\n> ").strip().split()
+            parts = input(f"\n{Colors.BOLD}> {Colors.ENDC}").strip().split()
             if not parts:
                 continue
             cmd = parts[0].lower()
@@ -190,7 +473,7 @@ Action Parameters Guide:
             if cmd == "exit":
                 break
             elif cmd == "help":
-                print(HELP_TEXT)
+                print(get_detailed_help(role))
             elif cmd == "house_status":
                 send_and_print(ws, {"command": "query_house", "house_id": house_id})
             elif cmd == "room_status" and len(parts) == 2:
@@ -198,7 +481,7 @@ Action Parameters Guide:
                     room_id = int(parts[1])
                     send_and_print(ws, {"command": "query_room", "house_id": house_id, "room_id": room_id})
                 except ValueError:
-                    print("[ERROR] Room ID must be a number")
+                    print_error("Room ID must be a number")
             elif cmd == "device_status" and len(parts) == 3:
                 try:
                     room_id = int(parts[1])
@@ -210,7 +493,7 @@ Action Parameters Guide:
                         "device_id": device_id
                     })
                 except ValueError:
-                    print("[ERROR] Room ID and Device ID must be numbers")
+                    print_error("Room ID and Device ID must be numbers")
             elif cmd == "group_status" and len(parts) == 2:
                 device_type = parts[1].capitalize()
                 send_and_print(ws, {
@@ -232,7 +515,7 @@ Action Parameters Guide:
                         "room_id": room_id
                     })
                 except ValueError:
-                    print("[ERROR] Room ID must be a number")
+                    print_error("Room ID must be a number")
             elif cmd == "list_type" and len(parts) == 2:
                 device_type = parts[1].capitalize()
                 send_and_print(ws, {
@@ -241,6 +524,11 @@ Action Parameters Guide:
                     "device_type": device_type
                 })
             elif cmd == "action" and len(parts) >= 4:
+                # Check permission for device control
+                if role == "guest":
+                    print_error("Permission denied: This action requires 'regular' or 'admin' role")
+                    continue
+                
                 try:
                     action = parts[1]
                     room_id = int(parts[2])
@@ -268,8 +556,13 @@ Action Parameters Guide:
                         
                     send_and_print(ws, action_cmd)
                 except ValueError:
-                    print("[ERROR] Room ID and Device ID must be numbers")
+                    print_error("Room ID and Device ID must be numbers")
             elif cmd == "group_action" and len(parts) >= 3:
+                # Check permission for device control
+                if role == "guest":
+                    print_error("Permission denied: This action requires 'regular' or 'admin' role")
+                    continue
+                
                 try:
                     device_type = parts[1].capitalize()
                     action = parts[2]
@@ -295,24 +588,110 @@ Action Parameters Guide:
                         
                     send_and_print(ws, action_cmd)
                 except ValueError:
-                    print("[ERROR] Invalid input format")
+                    print_error("Invalid input format")
+            elif cmd == "add_room" and len(parts) >= 2:
+                # Check permission for admin actions
+                if role != "admin":
+                    print_error("Permission denied: This action requires 'admin' role")
+                    continue
+                
+                # Join all parts after the command to form the room name
+                room_name = " ".join(parts[1:])
+                send_and_print(ws, {
+                    "command": "add_room",
+                    "room_name": room_name
+                })
+            elif cmd == "add_device" and len(parts) >= 3:
+                # Check permission for admin actions
+                if role != "admin":
+                    print_error("Permission denied: This action requires 'admin' role")
+                    continue
+                
+                try:
+                    room_id = int(parts[1])
+                    device_type = parts[2].lower()
+                    
+                    # Process optional attributes
+                    attributes = {}
+                    for i in range(3, len(parts)):
+                        if '=' in parts[i]:
+                            key, value = parts[i].split('=', 1)
+                            # Convert values to appropriate types
+                            if value.lower() in ('true', 'false'):
+                                # Convert to boolean
+                                attributes[key] = (value.lower() == 'true')
+                            elif value.isdigit():
+                                # Convert to integer
+                                attributes[key] = int(value)
+                            else:
+                                # Keep as string
+                                attributes[key] = value
+                    
+                    send_and_print(ws, {
+                        "command": "add_device",
+                        "room_id": room_id,
+                        "device_type": device_type,
+                        "attributes": attributes
+                    })
+                except ValueError:
+                    print_error("Room ID must be a number")
+            elif cmd == "del_room" and len(parts) == 2:
+                # Check permission for admin actions
+                if role != "admin":
+                    print_error("Permission denied: This action requires 'admin' role")
+                    continue
+                
+                try:
+                    room_id = int(parts[1])
+                    send_and_print(ws, {
+                        "command": "remove_room",
+                        "room_id": room_id
+                    })
+                except ValueError:
+                    print_error("Room ID must be a number")
+            elif cmd == "del_device" and len(parts) == 3:
+                # Check permission for admin actions
+                if role != "admin":
+                    print_error("Permission denied: This action requires 'admin' role")
+                    continue
+                
+                try:
+                    room_id = int(parts[1])
+                    device_id = int(parts[2])
+                    send_and_print(ws, {
+                        "command": "remove_device",
+                        "room_id": room_id,
+                        "device_id": device_id
+                    })
+                except ValueError:
+                    print_error("Room ID and Device ID must be numbers")
             elif cmd == "raw":
                 raw = input("Enter raw JSON: ")
                 ws.send(raw)
-                print("[RECEIVED]", ws.recv())
+                response = ws.recv()
+                print(f"[RECEIVED] {response}")
             else:
-                print("Unknown or malformed command.")
+                print_error("Unknown or malformed command. Type 'help' for available commands.")
         except Exception as e:
-            print("[ERROR]", e)
+            print_error(f"An error occurred: {e}")
 
 def main():
-    ws = websocket.create_connection(f"ws://{HOST}:{PORT}")
-    print("[CLIENT] Connected to server")
+    try:
+        print_info(f"Connecting to server at {HOST}:{PORT}...")
+        ws = websocket.create_connection(f"ws://{HOST}:{PORT}")
+        print_success("Connected to server")
 
-    login_response = login(ws)
-    house_id = join_house(ws, login_response.get("houses", []))
-    command_loop(ws, house_id)
-    ws.close()
+        login_response = login(ws)
+        house_id, role = join_house(ws, login_response.get("houses", []))
+        command_loop(ws, house_id, role)
+        ws.close()
+        print_info("Disconnected from server")
+    except ConnectionRefusedError:
+        print_error(f"Could not connect to server at {HOST}:{PORT}")
+        sys.exit(1)
+    except Exception as e:
+        print_error(f"An unexpected error occurred: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

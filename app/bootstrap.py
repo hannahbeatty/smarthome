@@ -24,21 +24,24 @@ def seed():
         print("[SEED] House created.")
 
         # Create a room
-        room = Room(name="Test Room", house_id=house.id)
+        room = Room(name="Test Room", house_id=house.id, next_device_id=1)
         session.add(room)
         session.flush()
         print("[SEED] Room created.")
 
-        # Add devices to room
-        # Add devices to room with explicit unique IDs
-        lamp = Lamp(id=1, on=False, shade=70, color="blue", room_id=room.id)
-        ceiling_light = CeilingLight(id=2, on=True, shade=80, color="warm", room_id=room.id)
-        blinds = Blinds(id=3, is_up=True, is_open=False, room_id=room.id)
-        lock = Lock(id=4, code="1234,4321,0000,1111,9999", is_unlocked=False, room_id=room.id)
+        # Add devices to room with IDs that are unique within the room
+        # Note: With the new schema, device IDs can start from 1 in each room
+        lamp = Lamp(id=1, room_id=room.id, on=False, shade=70, color="blue")
+        ceiling_light = CeilingLight(id=2, room_id=room.id, on=True, shade=80, color="warm")
+        blinds = Blinds(id=3, room_id=room.id, is_up=True, is_open=False)
+        lock = Lock(id=4, room_id=room.id, code="1234,4321,0000,1111,9999", is_unlocked=False)
 
         session.add_all([lamp, ceiling_light, blinds, lock])
         print("[SEED] Devices added.")
 
+        # Update room's next_device_id to be after the highest device ID
+        room.next_device_id = 5
+        
         # Add alarm to house (with threshold)
         alarm = Alarm(code=4321, is_armed=True, is_alarm=False, house_id=house.id)
         alarm.threshold = 3

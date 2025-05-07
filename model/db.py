@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, PrimaryKeyConstraint
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy import UniqueConstraint
 
@@ -39,6 +39,7 @@ class Room(Base):
     id = Column(Integer, primary_key=True)                 # Global DB ID (for joins)              # Per-house ID
     name = Column(String, nullable=True)                   # Optional display name
     house_id = Column(Integer, ForeignKey("houses.id"))
+    next_device_id = Column(Integer, default=1)  # Track next device ID for this room
 
     __table_args__ = (
         UniqueConstraint("house_id", "id", name="uq_room_in_house"),
@@ -50,14 +51,19 @@ class Room(Base):
     ceiling_light = relationship("CeilingLight", back_populates="room", uselist=False, cascade="all, delete-orphan")
     blinds = relationship("Blinds", back_populates="room", uselist=False, cascade="all, delete-orphan")
 
+
 class Lamp(Base):
     __tablename__ = 'lamps'
-    id = Column(Integer, primary_key=True)
+    id = Column(Integer, primary_key=True)  # This will be the device number within the room
     on = Column(Boolean, default=False)
     shade = Column(Integer, default=100)
     color = Column(String, default="white")
-    room_id = Column(Integer, ForeignKey('rooms.id', ondelete="CASCADE"))
+    room_id = Column(Integer, ForeignKey('rooms.id', ondelete="CASCADE"), primary_key=True)
     room = relationship("Room", back_populates="lamps")
+    
+    __table_args__ = (
+        PrimaryKeyConstraint('id', 'room_id', name='pk_lamp'),
+    )
 
 class CeilingLight(Base):
     __tablename__ = 'ceiling_lights'
@@ -65,8 +71,13 @@ class CeilingLight(Base):
     on = Column(Boolean, default=False)
     shade = Column(Integer, default=100)
     color = Column(String, default="white")
-    room_id = Column(Integer, ForeignKey('rooms.id', ondelete="CASCADE"), unique=True)
+    room_id = Column(Integer, ForeignKey('rooms.id', ondelete="CASCADE"), primary_key=True)
     room = relationship("Room", back_populates="ceiling_light")
+    
+    __table_args__ = (
+        PrimaryKeyConstraint('id', 'room_id', name='pk_ceiling_light'),
+        UniqueConstraint('room_id', name='uq_room_ceiling_light'),  # Only one ceiling light per room
+    )
 
 class Lock(Base):
     __tablename__ = 'locks'
@@ -74,16 +85,61 @@ class Lock(Base):
     is_unlocked = Column(Boolean, default=False)
     failed_attempts = Column(Integer, default=0)
     code = Column(String)  # e.g. JSON-encoded list of codes
-    room_id = Column(Integer, ForeignKey('rooms.id', ondelete="CASCADE"))
+    room_id = Column(Integer, ForeignKey('rooms.id', ondelete="CASCADE"), primary_key=True)
     room = relationship("Room", back_populates="locks")
+    
+    __table_args__ = (
+        PrimaryKeyConstraint('id', 'room_id', name='pk_lock'),
+    )
 
 class Blinds(Base):
     __tablename__ = 'blinds'
     id = Column(Integer, primary_key=True)
     is_up = Column(Boolean, default=True)
     is_open = Column(Boolean, default=False)
-    room_id = Column(Integer, ForeignKey('rooms.id', ondelete="CASCADE"), unique=True)
+    room_id = Column(Integer, ForeignKey('rooms.id', ondelete="CASCADE"), primary_key=True)
     room = relationship("Room", back_populates="blinds")
+    
+    __table_args__ = (
+        PrimaryKeyConstraint('id', 'room_id', name='pk_blinds'),
+        UniqueConstraint('room_id', name='uq_room_blinds'),  # Only one blinds per room
+    )
+
+
+# class Lamp(Base):
+#     __tablename__ = 'lamps'
+#     id = Column(Integer, primary_key=True)
+#     on = Column(Boolean, default=False)
+#     shade = Column(Integer, default=100)
+#     color = Column(String, default="white")
+#     room_id = Column(Integer, ForeignKey('rooms.id', ondelete="CASCADE"))
+#     room = relationship("Room", back_populates="lamps")
+
+# class CeilingLight(Base):
+#     __tablename__ = 'ceiling_lights'
+#     id = Column(Integer, primary_key=True)
+#     on = Column(Boolean, default=False)
+#     shade = Column(Integer, default=100)
+#     color = Column(String, default="white")
+#     room_id = Column(Integer, ForeignKey('rooms.id', ondelete="CASCADE"), unique=True)
+#     room = relationship("Room", back_populates="ceiling_light")
+
+# class Lock(Base):
+#     __tablename__ = 'locks'
+#     id = Column(Integer, primary_key=True)
+#     is_unlocked = Column(Boolean, default=False)
+#     failed_attempts = Column(Integer, default=0)
+#     code = Column(String)  # e.g. JSON-encoded list of codes
+#     room_id = Column(Integer, ForeignKey('rooms.id', ondelete="CASCADE"))
+#     room = relationship("Room", back_populates="locks")
+
+# class Blinds(Base):
+#     __tablename__ = 'blinds'
+#     id = Column(Integer, primary_key=True)
+#     is_up = Column(Boolean, default=True)
+#     is_open = Column(Boolean, default=False)
+#     room_id = Column(Integer, ForeignKey('rooms.id', ondelete="CASCADE"), unique=True)
+#     room = relationship("Room", back_populates="blinds")
 
 class Alarm(Base):
     __tablename__ = 'alarms'
@@ -95,5 +151,5 @@ class Alarm(Base):
     house = relationship("House", back_populates="alarm")
     threshold = Column(Integer, default=3)
 
-# i dont think alarm should cascade delete, but maybe it should
-# later i will figure out cascade delete for deleting a house (sudo user does it)
+# # i dont think alarm should cascade delete, but maybe it should
+# # later i will figure out cascade delete for deleting a house (sudo user does it)

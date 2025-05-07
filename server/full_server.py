@@ -5,7 +5,7 @@ from websocket_server import WebsocketServer
 
 from db.setup import SessionLocal
 from model.db import User, House, HouseUserRole
-from server.handlers import handle_device_action
+
 
 # Configure logging
 logging.basicConfig(
@@ -503,6 +503,226 @@ def handle_list_house_devices_message(client, server, data):
         logger.error(f"Error listing house devices: {str(e)}")
         send_error(client, server, f"Error: {str(e)}")
 
+def handle_add_room(client, server, data):
+    """Process request to add a new room"""
+    client_id = client['id']
+    
+    with clients_lock:
+        if client_id not in clients or not clients[client_id].get('authenticated'):
+            send_error(client, server, "Not authenticated")
+            return
+        
+        client_data = clients[client_id]
+    
+    house_id = client_data.get('house_id')
+    if not house_id:
+        send_error(client, server, "Not currently in a house")
+        return
+    
+    session = SessionLocal()
+    try:
+        from model.domain import User
+        from server.handlers import handle_add_room as handler_add_room
+        from server.broadcast import broadcast_to_house
+        
+        # Create domain user with role
+        user = User(
+            user_id=client_data['user_id'], 
+            username=client_data['username'], 
+            role=client_data['role']
+        )
+        
+        # Add house_id to the data
+        data['house_id'] = house_id
+        
+        # Call the handler
+        result = handler_add_room(data, session, user)
+        server.send_message(client, json.dumps(result))
+        
+        # Broadcast room addition to other clients if successful
+        if result.get('status') == 'success':
+            broadcast_message = {
+                "type": "room_added",
+                "house_id": house_id,
+                "room_id": result.get('room_id'),
+                "room_name": data.get('room_name', "New Room")
+            }
+            broadcast_to_house(house_id, broadcast_message, exclude_client_id=client_id)
+            logger.info(f"Room {result.get('room_id')} added and broadcasted to house {house_id}")
+        
+    except Exception as e:
+        logger.error(f"Error adding room: {str(e)}")
+        send_error(client, server, f"Error: {str(e)}")
+    finally:
+        session.close()
+
+def handle_add_device(client, server, data):
+    """Process request to add a new device"""
+    client_id = client['id']
+    
+    with clients_lock:
+        if client_id not in clients or not clients[client_id].get('authenticated'):
+            send_error(client, server, "Not authenticated")
+            return
+        
+        client_data = clients[client_id]
+    
+    house_id = client_data.get('house_id')
+    if not house_id:
+        send_error(client, server, "Not currently in a house")
+        return
+    
+    session = SessionLocal()
+    try:
+        from model.domain import User
+        from server.handlers import handle_add_device as handler_add_device
+        from server.broadcast import broadcast_to_house
+        
+        # Create domain user with role
+        user = User(
+            user_id=client_data['user_id'], 
+            username=client_data['username'], 
+            role=client_data['role']
+        )
+        
+        # Add house_id to the data
+        data['house_id'] = house_id
+        
+        # Call the handler
+        result = handler_add_device(data, session, user)
+        server.send_message(client, json.dumps(result))
+        
+        # Broadcast device addition to other clients if successful
+        if result.get('status') == 'success':
+            broadcast_message = {
+                "type": "device_added",
+                "house_id": house_id,
+                "room_id": data.get('room_id'),
+                "device_id": result.get('device_id'),
+                "device_type": data.get('device_type')
+            }
+            broadcast_to_house(house_id, broadcast_message, exclude_client_id=client_id)
+            logger.info(f"Device {result.get('device_id')} added and broadcasted to house {house_id}")
+        
+    except Exception as e:
+        logger.error(f"Error adding device: {str(e)}")
+        send_error(client, server, f"Error: {str(e)}")
+    finally:
+        session.close()
+
+def handle_remove_room(client, server, data):
+    """Process request to remove a room"""
+    client_id = client['id']
+    
+    with clients_lock:
+        if client_id not in clients or not clients[client_id].get('authenticated'):
+            send_error(client, server, "Not authenticated")
+            return
+        
+        client_data = clients[client_id]
+    
+    house_id = client_data.get('house_id')
+    if not house_id:
+        send_error(client, server, "Not currently in a house")
+        return
+    
+    # Store room_id for broadcasting before it might be removed from result
+    room_id = data.get('room_id')
+    
+    session = SessionLocal()
+    try:
+        from model.domain import User
+        from server.handlers import handle_remove_room as handler_remove_room
+        from server.broadcast import broadcast_to_house
+        
+        # Create domain user with role
+        user = User(
+            user_id=client_data['user_id'], 
+            username=client_data['username'], 
+            role=client_data['role']
+        )
+        
+        # Add house_id to the data
+        data['house_id'] = house_id
+        
+        # Call the handler
+        result = handler_remove_room(data, session, user)
+        server.send_message(client, json.dumps(result))
+        
+        # Broadcast room removal to other clients if successful
+        if result.get('status') == 'success':
+            broadcast_message = {
+                "type": "room_removed",
+                "house_id": house_id,
+                "room_id": room_id
+            }
+            broadcast_to_house(house_id, broadcast_message, exclude_client_id=client_id)
+            logger.info(f"Room {room_id} removed and broadcasted to house {house_id}")
+        
+    except Exception as e:
+        logger.error(f"Error removing room: {str(e)}")
+        send_error(client, server, f"Error: {str(e)}")
+    finally:
+        session.close()
+
+def handle_remove_device(client, server, data):
+    """Process request to remove a device"""
+    client_id = client['id']
+    
+    with clients_lock:
+        if client_id not in clients or not clients[client_id].get('authenticated'):
+            send_error(client, server, "Not authenticated")
+            return
+        
+        client_data = clients[client_id]
+    
+    house_id = client_data.get('house_id')
+    if not house_id:
+        send_error(client, server, "Not currently in a house")
+        return
+    
+    # Store these for broadcasting before they might be removed from result
+    room_id = data.get('room_id')
+    device_id = data.get('device_id')
+    
+    session = SessionLocal()
+    try:
+        from model.domain import User
+        from server.handlers import handle_remove_device as handler_remove_device
+        from server.broadcast import broadcast_to_house
+        
+        # Create domain user with role
+        user = User(
+            user_id=client_data['user_id'], 
+            username=client_data['username'], 
+            role=client_data['role']
+        )
+        
+        # Add house_id to the data
+        data['house_id'] = house_id
+        
+        # Call the handler
+        result = handler_remove_device(data, session, user)
+        server.send_message(client, json.dumps(result))
+        
+        # Broadcast device removal to other clients if successful
+        if result.get('status') == 'success':
+            broadcast_message = {
+                "type": "device_removed",
+                "house_id": house_id,
+                "room_id": room_id,
+                "device_id": device_id
+            }
+            broadcast_to_house(house_id, broadcast_message, exclude_client_id=client_id)
+            logger.info(f"Device {device_id} removed and broadcasted to house {house_id}")
+        
+    except Exception as e:
+        logger.error(f"Error removing device: {str(e)}")
+        send_error(client, server, f"Error: {str(e)}")
+    finally:
+        session.close()
+
+
 def handle_list_room_devices_message(client, server, data):
     client_id = client['id']
     
@@ -618,6 +838,15 @@ def message_received(client, server, message):
             handle_list_room_devices_message(client, server, data)
         elif command == 'list_group_devices':
             handle_list_group_devices_message(client, server, data)
+        # Add the new command handlers here
+        elif command == 'add_room':
+            handle_add_room(client, server, data)
+        elif command == 'add_device':
+            handle_add_device(client, server, data)
+        elif command == 'remove_room':
+            handle_remove_room(client, server, data)
+        elif command == 'remove_device':
+            handle_remove_device(client, server, data)
         else:
             send_error(client, server, f"Unknown command: {command}")
     
@@ -626,7 +855,7 @@ def message_received(client, server, message):
     except Exception as e:
         logger.error(f"Error processing message: {str(e)}")
         send_error(client, server, "Internal server error")
-
+    
 def send_error(client, server, message):
     """Send error response to client"""
     response = {

@@ -32,6 +32,12 @@ class Room:
         self.ceiling_light = None  # only one
         self.blinds = None         # only one
         self.device_map = {}
+        self.next_device_id = 1    # Track next device ID for this room
+
+    def get_next_device_id(self):
+        device_id = self.next_device_id
+        self.next_device_id += 1
+        return device_id
 
     def build_device_cache(self):
         self.device_map = {}

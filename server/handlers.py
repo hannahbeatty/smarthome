@@ -160,6 +160,8 @@ def handle_device_group_status(request_data, house, user):
 
 def handle_device_group_action(house, user, session, request_data):
     """Handle action on all devices of a specific type"""
+    if not user.can_control():
+        return {"status": "error", "message": "User lacks permission to control devices"}
     device_type = request_data.get("device_type")
     action = request_data.get("action")
     params = request_data.get("params", {})
@@ -413,95 +415,29 @@ def handle_add_room(data, session, user):
         return {"status": "error", "message": "Permission denied."}
 
     house_id = data.get("house_id")
-    name = data.get("room_name", None)
+    name = data.get("room_name", "New Room")  # Default name if none provided
 
-    # Find the next room_id for this house
-    existing_ids = session.query(RoomORM.room_id).filter_by(house_id=house_id).all()
-    used_ids = {rid for (rid,) in existing_ids}
-    next_room_id = 1
-    while next_room_id in used_ids:
-        next_room_id += 1
-
-    new_room = RoomORM(house_id=house_id, room_id=next_room_id, name=name)
+    # Create new room
+    new_room = RoomORM(house_id=house_id, name=name)
     session.add(new_room)
+    session.flush()  # This generates the primary key (id)
+    
+    # Update domain model if house is in memory
+    if house_id in active_houses:
+        house = active_houses[house_id]
+        # Create a domain room object with the new room's ID
+        from model.domain import Room
+        room = Room(room_id=new_room.id, name=name)
+        # Add to house
+        house.add_room(room)
+        room.build_device_cache()
+    
     session.commit()
 
     return {
         "status": "success",
-        "message": f"Room {next_room_id} added",
-        "room_id": next_room_id
-    }
-
-def add_device_to_room(house, room_id, device_type, attributes=None):
-    """
-    Add a new device to a room with a unique device ID.
-    
-    Args:
-        house: The SmartHouse domain object
-        room_id: The ID of the room to add the device to
-        device_type: The type of device to add ("lamp", "lock", etc.)
-        attributes: Optional dictionary of device attributes
-    
-    Returns:
-        dict: Status response with device_id if successful
-    """
-    if attributes is None:
-        attributes = {}
-    
-    room = house.rooms.get(room_id)
-    if not room:
-        return {"status": "error", "message": f"Room {room_id} not found"}
-    
-    # Get a unique device ID for the new device
-    device_id = house.get_next_device_id()
-    
-    # Create the appropriate device with the allocated ID
-    if device_type.lower() == "lamp":
-        device = Lamp(
-            device_id=device_id,
-            on=attributes.get("on", False),
-            shade=attributes.get("shade", 100),
-            color=attributes.get("color", "white")
-        )
-        room.add_lamp(device)
-    elif device_type.lower() == "lock":
-        code = attributes.get("code", "0000")
-        # Convert code to list if it's a string
-        if isinstance(code, str):
-            code_list = code.split(",") if "," in code else [code]
-        else:
-            code_list = [str(code)]
-        device = Lock(
-            device_id=device_id,
-            code=code_list,
-            is_unlocked=attributes.get("is_unlocked", False)
-        )
-        room.add_lock(device)
-    elif device_type.lower() == "blinds":
-        device = Blinds(
-            device_id=device_id,
-            is_up=attributes.get("is_up", True),
-            is_open=attributes.get("is_open", False)
-        )
-        room.add_blinds(device)
-    elif device_type.lower() == "ceiling_light":
-        device = CeilingLight(
-            device_id=device_id,
-            on=attributes.get("on", False),
-            shade=attributes.get("shade", 100),
-            color=attributes.get("color", "white")
-        )
-        room.add_ceiling_light(device)
-    else:
-        return {"status": "error", "message": f"Unknown device type: {device_type}"}
-    
-    # Update the device cache
-    room.build_device_cache()
-    
-    return {
-        "status": "success",
-        "message": f"{device_type} added successfully",
-        "device_id": device_id
+        "message": f"Room '{name}' added",
+        "room_id": new_room.id
     }
 
 
@@ -515,18 +451,34 @@ def handle_add_device(data, session, user):
     device_type = data["device_type"]
     attrs = data.get("attributes", {})
 
+    # Validate device type
+    valid_device_types = ["lamp", "lock", "blinds", "ceiling_light"]
+    if device_type.lower() not in valid_device_types:
+        return {
+            "status": "error", 
+            "message": f"Invalid device type: '{device_type}'. Valid types are: {', '.join(valid_device_types)}"
+        }
+
     # Get the house from active houses
     house = active_houses.get(house_id)
     if not house:
         return {"status": "error", "message": "House not found in memory"}
     
-    # Get a unique device ID for the new device
-    device_id = house.get_next_device_id()
+    # Get the room
+    domain_room = house.rooms.get(room_id)
+    if not domain_room:
+        return {"status": "error", "message": f"Room {room_id} not found."}
+    
+    # Get a unique device ID for the new device within this room
+    device_id = domain_room.get_next_device_id()
     
     # Get actual Room DB entry using house_id + room_id
     room_orm = session.query(RoomORM).filter_by(house_id=house_id, id=room_id).first()
     if not room_orm:
-        return {"status": "error", "message": "Room not found."}
+        return {"status": "error", "message": "Room not found in database."}
+    
+    # Update the next_device_id in the database for this room
+    room_orm.next_device_id = domain_room.next_device_id
 
     try:
         # Create the device with the assigned ID
@@ -538,49 +490,45 @@ def handle_add_device(data, session, user):
             dev = BlindsORM(id=device_id, room_id=room_orm.id, **attrs)
         elif device_type.lower() == "ceiling_light":
             dev = CeilingLightORM(id=device_id, room_id=room_orm.id, **attrs)
-        else:
-            return {"status": "error", "message": "Invalid device type"}
-
+        
         session.add(dev)
         session.commit()
         
         # Also update domain model
-        domain_room = house.rooms.get(room_id)
-        if domain_room:
-            if device_type.lower() == "lamp":
-                domain_device = Lamp(
-                    device_id=device_id,
-                    on=attrs.get("on", False),
-                    shade=attrs.get("shade", 100),
-                    color=attrs.get("color", "white")
-                )
-                domain_room.add_lamp(domain_device)
-            elif device_type.lower() == "lock":
-                code = attrs.get("code", "0000")
-                domain_device = Lock(
-                    device_id=device_id,
-                    code=code.split(",") if "," in code else [code],
-                    is_unlocked=attrs.get("is_unlocked", False)
-                )
-                domain_room.add_lock(domain_device)
-            elif device_type.lower() == "blinds":
-                domain_device = Blinds(
-                    device_id=device_id,
-                    is_up=attrs.get("is_up", True),
-                    is_open=attrs.get("is_open", False)
-                )
-                domain_room.add_blinds(domain_device)
-            elif device_type.lower() == "ceiling_light":
-                domain_device = CeilingLight(
-                    device_id=device_id,
-                    on=attrs.get("on", False),
-                    shade=attrs.get("shade", 100),
-                    color=attrs.get("color", "white")
-                )
-                domain_room.add_ceiling_light(domain_device)
+        if device_type.lower() == "lamp":
+            domain_device = Lamp(
+                device_id=device_id,
+                on=attrs.get("on", False),
+                shade=attrs.get("shade", 100),
+                color=attrs.get("color", "white")
+            )
+            domain_room.add_lamp(domain_device)
+        elif device_type.lower() == "lock":
+            code = attrs.get("code", "0000")
+            domain_device = Lock(
+                device_id=device_id,
+                code=code.split(",") if "," in code else [code],
+                is_unlocked=attrs.get("is_unlocked", False)
+            )
+            domain_room.add_lock(domain_device)
+        elif device_type.lower() == "blinds":
+            domain_device = Blinds(
+                device_id=device_id,
+                is_up=attrs.get("is_up", True),
+                is_open=attrs.get("is_open", False)
+            )
+            domain_room.add_blinds(domain_device)
+        elif device_type.lower() == "ceiling_light":
+            domain_device = CeilingLight(
+                device_id=device_id,
+                on=attrs.get("on", False),
+                shade=attrs.get("shade", 100),
+                color=attrs.get("color", "white")
+            )
+            domain_room.add_ceiling_light(domain_device)
                 
-            # Update device cache
-            domain_room.build_device_cache()
+        # Update device cache
+        domain_room.build_device_cache()
 
         return {
             "status": "success", 
@@ -593,44 +541,104 @@ def handle_add_device(data, session, user):
         return {"status": "error", "message": f"Failed to add device: {str(e)}"}
 
 def handle_remove_device(data, session, user):
+    """Remove a device from a room"""
     if not user.can_modify_structure():
         return {"status": "error", "message": "Permission denied."}
 
-    dtype = data["device_type"]
-    dev_id = data["device_id"]
+    house_id = data.get("house_id")
+    room_id = data.get("room_id")
+    device_id = data.get("device_id")
 
-    cls = DEVICE_CLASSES.get(dtype)
-    if not cls:
-        return {"status": "error", "message": "Invalid device type"}
+    if not all([house_id, room_id, device_id]):
+        return {"status": "error", "message": "Missing required parameters."}
 
-    dev = session.query(cls).get(dev_id)
-    if not dev:
-        return {"status": "error", "message": "Device not found"}
+    if house_id not in active_houses:
+        return {"status": "error", "message": "House not active in memory."}
 
-    session.delete(dev)
-    session.commit()
+    house = active_houses[house_id]
+    domain_room = house.rooms.get(room_id)
 
-    return {"status": "success", "message": f"{dtype} removed"}
+    if not domain_room:
+        return {"status": "error", "message": f"Room {room_id} not found."}
+
+    # Check if the device exists in the room
+    if device_id not in domain_room.device_map:
+        return {"status": "error", "message": f"Device {device_id} not found in room {room_id}."}
+
+    try:
+        # Delete device from the database using ID only
+        deleted = False
+        for orm_class in [LampORM, LockORM, BlindsORM, CeilingLightORM]:
+            device = session.query(orm_class).filter_by(id=device_id).first()
+            if device:
+                session.delete(device)
+                deleted = True
+                break
+
+        if not deleted:
+            return {"status": "error", "message": f"Device {device_id} not found in database."}
+
+        session.commit()
+
+        # Remove from in-memory domain model
+        if device_id in domain_room.lamps:
+            del domain_room.lamps[device_id]
+        elif device_id in domain_room.locks:
+            del domain_room.locks[device_id]
+        elif domain_room.ceiling_light and domain_room.ceiling_light.device_id == device_id:
+            domain_room.ceiling_light = None
+        elif domain_room.blinds and domain_room.blinds.device_id == device_id:
+            domain_room.blinds = None
+
+        # Rebuild device_map
+        domain_room.build_device_cache()
+
+        return {
+            "status": "success",
+            "message": f"Device {device_id} deleted successfully."
+        }
+
+    except Exception as e:
+        session.rollback()
+        return {"status": "error", "message": f"Failed to delete device: {str(e)}"}
 
 def handle_remove_room(data, session, user):
-    # 1. Authorization check
     if not user.can_modify_structure():
-        return {"status": "error", "message": "Permission denied"}
+        return {"status": "error", "message": "Permission denied."}
 
-    # 2. Get parameters from the message
-    house_id = data["house_id"]
-    room_id = data["room_id"]
+    house_id = data.get("house_id")
+    room_id = data.get("room_id")
 
-    # 3. Fetch the room (must match on both house and room_id)
-    room = session.query(RoomORM).filter_by(house_id=house_id, room_id=room_id).first()
-    if not room:
-        return {"status": "error", "message": "Room not found"}
+    # Check that the house is loaded in memory
+    if house_id not in active_houses:
+        return {"status": "error", "message": "House not active in memory."}
 
-    # 4. Delete the room (cascade will clean up the devices!)
-    session.delete(room)
-    session.commit()
+    house = active_houses[house_id]
 
-    return {"status": "success", "message": f"Room {room_id} deleted from house {house_id}"}
+    # Find room in DB
+    room_orm = session.query(RoomORM).filter_by(house_id=house_id, id=room_id).first()
+    if not room_orm:
+        return {"status": "error", "message": f"Room {room_id} not found in database."}
+
+    try:
+        # Delete from database — cascades to devices
+        session.delete(room_orm)
+        session.commit()
+
+        # Remove from domain model
+        room = house.rooms.pop(room_id, None)
+        if room:
+            pass
+            #this was where the device map thing was i removed
+
+        return {
+            "status": "success",
+            "message": f"Room {room_id} deleted successfully."
+        }
+
+    except Exception as e:
+        session.rollback()
+        return {"status": "error", "message": f"Failed to delete room: {str(e)}"}
 
 
 

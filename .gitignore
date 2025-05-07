@@ -1,2 +1,4 @@
 venv
 smart_home.db
+__pycache__/
+*.pyc

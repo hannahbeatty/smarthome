@@ -44,6 +44,21 @@ def domain_room_from_orm(room_row):
     print(f"Creating domain room: id={room_row.id}, name={room_row.name}")
     room = Room(room_id=room_row.id, name=room_row.name)
 
+    # Set the next_device_id from the database
+    if hasattr(room_row, 'next_device_id'):
+        room.next_device_id = room_row.next_device_id
+    else:
+        # If not in database, calculate the next ID by finding the highest device ID + 1
+        max_id = 0
+        for device_collection in [room_row.lamps, room_row.locks]:
+            for device in device_collection:
+                max_id = max(max_id, device.id)
+        if room_row.ceiling_light:
+            max_id = max(max_id, room_row.ceiling_light.id)
+        if room_row.blinds:
+            max_id = max(max_id, room_row.blinds.id)
+        room.next_device_id = max_id + 1
+
     print(f"Room {room_row.id} has {len(room_row.lamps)} lamps, {len(room_row.locks)} locks, "
           f"ceiling_light={room_row.ceiling_light is not None}, "
           f"blinds={room_row.blinds is not None}")
@@ -71,7 +86,6 @@ def domain_room_from_orm(room_row):
         print(f"    Device {device_id}: type={type(device).__name__}")
     
     return room
-
 
 
 def domain_alarm_from_orm(alarm_row):
