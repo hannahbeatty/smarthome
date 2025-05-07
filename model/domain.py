@@ -56,7 +56,13 @@ class Room:
         self.lamps[lamp.device_id] = lamp
 
     def add_lock(self, lock):
+        """Add a lock to the room with backlinks for alarm notification"""
         self.locks[lock.device_id] = lock
+        
+        # Set a back-reference to the room for alarm notifications
+        if not hasattr(lock, '_room'):
+            lock._room = {}
+        lock._room[self.room_id] = self
 
     def add_blinds(self, blinds):
         if self.blinds is not None:
@@ -128,23 +134,39 @@ class Alarm:
 
     def link_house(self, house):
         self.house = house
-
+    
     def notify_wrong_code(self, lock_id):
+        # Track failed attempts
         self.failed_attempts_by_lock[lock_id] = self.failed_attempts_by_lock.get(lock_id, 0) + 1
         total_failures = sum(self.failed_attempts_by_lock.values())
+        
+        print(f"[ALARM] Lock {lock_id} failed attempt. Total failures: {total_failures}/{self.threshold}")
 
-        if total_failures >= self.threshold:
+        # Only trigger if armed and threshold is met
+        if self.is_armed and total_failures >= self.threshold:
             self.trigger_alarm()
 
     def trigger_alarm(self):
-        if self.is_armed:
+        if self.is_armed and not self.is_alarm:  # Only if transitioning from not alarmed to alarmed
             self.is_alarm = True
             print("[ALARM TRIGGERED] Excessive failed attempts on lock!")
+            
+            # Only try to notify if the alarm is attached to a house
+            if hasattr(self, 'house') and self.house:
+                # Import locally to avoid circular imports
+                from server.handlers import notify_alarm_triggered
+                notify_alarm_triggered(self.house.house_id)
 
     def disarm(self):
         self.is_armed = False
         self.is_alarm = False
         self.failed_attempts_by_lock.clear()
+
+    def arm(self):
+        """Arm the alarm system."""
+        self.is_armed = True
+        self.failed_attempts_by_lock.clear()  # Reset failed attempts when arming
+        return True
 
     def check_status(self):
         return {
@@ -296,6 +318,12 @@ class Lock:
             return True
         else:
             self.failed_attempts += 1
+            
+            # Try to access the parent room and notify the house alarm
+            for room_id, room in getattr(self, '_room', {}).items():
+                if hasattr(room, 'house') and room.house and room.house.alarm:
+                    room.house.alarm.notify_wrong_code(self.device_id)
+            
             return False
 
     def check_status(self):

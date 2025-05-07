@@ -3,9 +3,71 @@ import threading
 import logging
 from websocket_server import WebsocketServer
 
+import signal
+import sys
+
 from db.setup import SessionLocal
 from model.db import User, House, HouseUserRole
 
+from server.shared_state import state
+
+
+
+def setup_signal_handlers(server):
+    """Setup signal handlers for graceful shutdown"""
+    def signal_handler(sig, frame):
+        logger.info("Shutdown signal received, closing connections...")
+        
+        # Notify all clients about the shutdown
+        shutdown_message = json.dumps({
+            "type": "server_shutdown", 
+            "message": "Server is shutting down for maintenance"
+        })
+        
+        # Send message to all connected clients
+        for client in server.clients:
+            try:
+                server.send_message(client, shutdown_message)
+            except Exception as e:
+                logger.error(f"Error notifying client {client['id']} of shutdown: {str(e)}")
+        
+        # Log active connections before shutting down
+        try:
+            lock_acquired = state.clients_lock.acquire(timeout=5)
+            if lock_acquired:
+                try:
+                    logger.info(f"Shutting down with {len(state.clients)} active connections")
+                    # Could perform additional cleanup of client resources here
+                finally:
+                    state.clients_lock.release()
+        except Exception as e:
+            logger.error(f"Error accessing client lock during shutdown: {str(e)}")
+        
+        # Clean up any other resources
+        # For example, you might want to commit any pending database transactions
+        try:
+            session = SessionLocal()
+            session.commit()
+            session.close()
+            logger.info("Database session closed")
+        except Exception as e:
+            logger.error(f"Error closing database session: {str(e)}")
+        
+        # Close the websocket server
+        try:
+            server.server_close()
+            logger.info("WebSocket server closed")
+        except Exception as e:
+            logger.error(f"Error closing server: {str(e)}")
+        
+        logger.info("Server shutdown complete")
+        sys.exit(0)
+    
+    # Register the signal handler for various signals
+    signal.signal(signal.SIGINT, signal_handler)   # Handle Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler)  # Handle termination signal
+    
+    logger.info("Signal handlers registered for graceful shutdown")
 
 # Configure logging
 logging.basicConfig(
@@ -14,9 +76,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger('WebSocketServer')
 
-# Client tracking - maps client IDs to user info
-clients = {}
-clients_lock = threading.Lock()
 
 # Configuration
 HOST = '0.0.0.0'
@@ -27,29 +86,28 @@ def new_client(client, server):
     client_id = client['id']
     logger.info(f"New client connected: {client_id}")
     
-    with clients_lock:
-        clients[client_id] = {
-            'user_id': None,
-            'username': None,
-            'house_id': None,
-            'authenticated': False
-        }
+    state.add_client(client_id, {
+        'user_id': None,
+        'username': None,
+        'house_id': None,
+        'authenticated': False
+    })
 
 def client_left(client, server):
     """Handle client disconnection"""
     client_id = client['id']
     logger.info(f"Client disconnected: {client_id}")
     
-    with clients_lock:
-        if client_id in clients:
-            # Get house_id before removing client
-            house_id = clients[client_id].get('house_id')
-            if house_id:
-                from server.broadcast import unregister_client
-                unregister_client(house_id, client)
-            
-            # Remove client from tracking
-            del clients[client_id]
+    client_data = state.get_client(client_id)
+    if client_data:
+        # Get house_id before removing client
+        house_id = client_data.get('house_id')
+        if house_id:
+            from server.broadcast import unregister_client
+            unregister_client(house_id, client)
+        
+        # Remove client from tracking
+        state.remove_client(client_id)
 
 def handle_login(client, server, data):
     """Process login request"""
@@ -89,14 +147,13 @@ def handle_login(client, server, data):
             for house, role in houses_query
         ]
         
-        # Update client tracking info
-        with clients_lock:
-            clients[client_id] = {
-                'user_id': user.id,
-                'username': user.username,
-                'authenticated': True,
-                'house_id': None  # Will be set when they join a house
-            }
+        # Update client tracking info using shared state
+        state.update_client(client_id, {
+            'user_id': user.id,
+            'username': user.username,
+            'authenticated': True,
+            'house_id': None  # Will be set when they join a house
+        })
         
         # Send login success response
         response = {
@@ -120,12 +177,11 @@ def handle_join_house(client, server, data):
     """Process request to join a house"""
     client_id = client['id']
     
-    with clients_lock:
-        if client_id not in clients or not clients[client_id].get('authenticated'):
-            send_error(client, server, "Not authenticated")
-            return
-        
-        client_data = clients[client_id]
+    # Get client data from shared state
+    client_data = state.get_client(client_id)
+    if not client_data or not client_data.get('authenticated'):
+        send_error(client, server, "Not authenticated")
+        return
     
     house_id = data.get('house_id')
     if not house_id:
@@ -151,23 +207,26 @@ def handle_join_house(client, server, data):
         if old_house_id:
             unregister_client(old_house_id, client)
         
-        # Update client's current house
-        with clients_lock:
-            clients[client_id]['house_id'] = house_id
-            clients[client_id]['role'] = house_role.role
+        # Update client's current house using shared state
+        state.update_client(client_id, {
+            'house_id': house_id,
+            'role': house_role.role
+        })
         
         # Register client for broadcasts to this house
         register_client(house_id, client)
         
         # Load house data and send initial state
         from model.bridge import domain_house_from_orm
-        from server.handlers import get_house_state, active_houses
+        from server.handlers import get_house_state
         
         house_row = session.query(House).get(house_id)
-        if house_id not in active_houses:
-            active_houses[house_id] = domain_house_from_orm(house_row)
+        # Use state to check and update active_houses
+        house = state.get_house(house_id)
+        if not house:
+            house = domain_house_from_orm(house_row)
+            state.add_house(house_id, house)
         
-        house = active_houses[house_id]
         house_state = get_house_state(house)
         
         # Send house joined response with initial state
@@ -192,20 +251,21 @@ def handle_logout(client, server, data):
     """Process logout request"""
     client_id = client['id']
     
-    with clients_lock:
-        if client_id not in clients:
-            return
-        
-        # Get house_id before resetting
-        house_id = clients[client_id].get('house_id')
-        
-        # Reset client state
-        clients[client_id] = {
-            'user_id': None,
-            'username': None,
-            'house_id': None,
-            'authenticated': False
-        }
+    # Get client data from shared state
+    client_data = state.get_client(client_id)
+    if not client_data:
+        return
+    
+    # Get house_id before resetting
+    house_id = client_data.get('house_id')
+    
+    # Reset client state using shared state
+    state.update_client(client_id, {
+        'user_id': None,
+        'username': None,
+        'house_id': None,
+        'authenticated': False
+    })
     
     # Unregister from broadcasts if in a house
     if house_id:
@@ -224,12 +284,11 @@ def handle_device_action_message(client, server, data):
     """Process device control request"""
     client_id = client['id']
     
-    with clients_lock:
-        if client_id not in clients or not clients[client_id].get('authenticated'):
-            send_error(client, server, "Not authenticated")
-            return
-        
-        client_data = clients[client_id]
+    # Get client data from shared state
+    client_data = state.get_client(client_id)
+    if not client_data or not client_data.get('authenticated'):
+        send_error(client, server, "Not authenticated")
+        return
     
     house_id = client_data.get('house_id')
     if not house_id:
@@ -239,7 +298,6 @@ def handle_device_action_message(client, server, data):
     session = SessionLocal()
     try:
         from model.domain import User
-        from server.handlers import active_houses
         from server.handlers import handle_device_action
         
         # Create domain user with role
@@ -249,8 +307,8 @@ def handle_device_action_message(client, server, data):
             role=client_data['role']
         )
         
-        # Get house and call handler
-        house = active_houses.get(house_id)
+        # Get house from shared state
+        house = state.get_house(house_id)
         if not house:
             send_error(client, server, "House data not loaded")
             return
@@ -268,12 +326,12 @@ def handle_device_action_message(client, server, data):
 def handle_device_status_message(client, server, data):
     client_id = client['id']
 
-    with clients_lock:
-        if client_id not in clients or not clients[client_id].get('authenticated'):
-            send_error(client, server, "Not authenticated")
-            return
-        client_data = clients[client_id]
-
+    # Get client data from shared state
+    client_data = state.get_client(client_id)
+    if not client_data or not client_data.get('authenticated'):
+        send_error(client, server, "Not authenticated")
+        return
+    
     house_id = client_data.get('house_id')
     if not house_id:
         send_error(client, server, "Not currently in a house")
@@ -281,7 +339,7 @@ def handle_device_status_message(client, server, data):
 
     try:
         from model.domain import User
-        from server.handlers import active_houses, handle_device_status
+        from server.handlers import handle_device_status
 
         user = User(
             user_id=client_data['user_id'],
@@ -289,7 +347,8 @@ def handle_device_status_message(client, server, data):
             role=client_data['role']
         )
 
-        house = active_houses.get(house_id)
+        # Get house from shared state
+        house = state.get_house(house_id)
         if not house:
             send_error(client, server, "House data not loaded")
             return
@@ -305,12 +364,11 @@ def handle_query_house(client, server, data):
     """Process request to query entire house state"""
     client_id = client['id']
     
-    with clients_lock:
-        if client_id not in clients or not clients[client_id].get('authenticated'):
-            send_error(client, server, "Not authenticated")
-            return
-        
-        client_data = clients[client_id]
+    # Get client data from shared state
+    client_data = state.get_client(client_id)
+    if not client_data or not client_data.get('authenticated'):
+        send_error(client, server, "Not authenticated")
+        return
     
     house_id = client_data.get('house_id')
     if not house_id:
@@ -318,9 +376,10 @@ def handle_query_house(client, server, data):
         return
     
     try:
-        from server.handlers import active_houses, get_house_state
+        from server.handlers import get_house_state
         
-        house = active_houses.get(house_id)
+        # Get house from shared state
+        house = state.get_house(house_id)
         if not house:
             send_error(client, server, "House data not loaded")
             return
@@ -340,18 +399,15 @@ def handle_query_house(client, server, data):
         logger.error(f"Error querying house: {str(e)}")
         send_error(client, server, f"Error: {str(e)}")
 
-
-
 def handle_query_room(client, server, data):
     """Process request to query a room's state"""
     client_id = client['id']
     
-    with clients_lock:
-        if client_id not in clients or not clients[client_id].get('authenticated'):
-            send_error(client, server, "Not authenticated")
-            return
-        
-        client_data = clients[client_id]
+    # Get client data from shared state
+    client_data = state.get_client(client_id)
+    if not client_data or not client_data.get('authenticated'):
+        send_error(client, server, "Not authenticated")
+        return
     
     house_id = client_data.get('house_id')
     if not house_id:
@@ -364,9 +420,10 @@ def handle_query_room(client, server, data):
         return
     
     try:
-        from server.handlers import active_houses, get_room_state
+        from server.handlers import get_room_state
         
-        house = active_houses.get(house_id)
+        # Get house from shared state
+        house = state.get_house(house_id)
         if not house:
             send_error(client, server, "House data not loaded")
             return
@@ -394,11 +451,11 @@ def handle_query_room(client, server, data):
 def handle_device_group_status_message(client, server, data):
     client_id = client['id']
     
-    with clients_lock:
-        if client_id not in clients or not clients[client_id].get('authenticated'):
-            send_error(client, server, "Not authenticated")
-            return
-        client_data = clients[client_id]
+    # Get client data from shared state
+    client_data = state.get_client(client_id)
+    if not client_data or not client_data.get('authenticated'):
+        send_error(client, server, "Not authenticated")
+        return
     
     house_id = client_data.get('house_id')
     if not house_id:
@@ -407,7 +464,7 @@ def handle_device_group_status_message(client, server, data):
     
     try:
         from model.domain import User
-        from server.handlers import active_houses, handle_device_group_status
+        from server.handlers import handle_device_group_status
         
         user = User(
             user_id=client_data['user_id'],
@@ -415,7 +472,8 @@ def handle_device_group_status_message(client, server, data):
             role=client_data['role']
         )
         
-        house = active_houses.get(house_id)
+        # Get house from shared state
+        house = state.get_house(house_id)
         if not house:
             send_error(client, server, "House data not loaded")
             return
@@ -427,15 +485,15 @@ def handle_device_group_status_message(client, server, data):
         logger.error(f"Error handling device group status: {str(e)}")
         send_error(client, server, f"Error: {str(e)}")
 
+
 def handle_device_group_action_message(client, server, data):
     client_id = client['id']
     
-    with clients_lock:
-        if client_id not in clients or not clients[client_id].get('authenticated'):
-            send_error(client, server, "Not authenticated")
-            return
-        
-        client_data = clients[client_id]
+    # Get client data from shared state
+    client_data = state.get_client(client_id)
+    if not client_data or not client_data.get('authenticated'):
+        send_error(client, server, "Not authenticated")
+        return
     
     house_id = client_data.get('house_id')
     if not house_id:
@@ -445,7 +503,7 @@ def handle_device_group_action_message(client, server, data):
     session = SessionLocal()
     try:
         from model.domain import User
-        from server.handlers import active_houses, handle_device_group_action
+        from server.handlers import handle_device_group_action
         
         user = User(
             user_id=client_data['user_id'],
@@ -453,7 +511,8 @@ def handle_device_group_action_message(client, server, data):
             role=client_data['role']
         )
         
-        house = active_houses.get(house_id)
+        # Get house from shared state
+        house = state.get_house(house_id)
         if not house:
             send_error(client, server, "House data not loaded")
             return
@@ -470,11 +529,11 @@ def handle_device_group_action_message(client, server, data):
 def handle_list_house_devices_message(client, server, data):
     client_id = client['id']
     
-    with clients_lock:
-        if client_id not in clients or not clients[client_id].get('authenticated'):
-            send_error(client, server, "Not authenticated")
-            return
-        client_data = clients[client_id]
+    # Get client data from shared state
+    client_data = state.get_client(client_id)
+    if not client_data or not client_data.get('authenticated'):
+        send_error(client, server, "Not authenticated")
+        return
     
     house_id = client_data.get('house_id')
     if not house_id:
@@ -483,7 +542,7 @@ def handle_list_house_devices_message(client, server, data):
     
     try:
         from model.domain import User
-        from server.handlers import active_houses, handle_list_house_devices
+        from server.handlers import handle_list_house_devices
         
         user = User(
             user_id=client_data['user_id'],
@@ -491,7 +550,8 @@ def handle_list_house_devices_message(client, server, data):
             role=client_data['role']
         )
         
-        house = active_houses.get(house_id)
+        # Get house from shared state
+        house = state.get_house(house_id)
         if not house:
             send_error(client, server, "House data not loaded")
             return
@@ -503,16 +563,16 @@ def handle_list_house_devices_message(client, server, data):
         logger.error(f"Error listing house devices: {str(e)}")
         send_error(client, server, f"Error: {str(e)}")
 
+
 def handle_add_room(client, server, data):
     """Process request to add a new room"""
     client_id = client['id']
     
-    with clients_lock:
-        if client_id not in clients or not clients[client_id].get('authenticated'):
-            send_error(client, server, "Not authenticated")
-            return
-        
-        client_data = clients[client_id]
+    # Get client data from shared state
+    client_data = state.get_client(client_id)
+    if not client_data or not client_data.get('authenticated'):
+        send_error(client, server, "Not authenticated")
+        return
     
     house_id = client_data.get('house_id')
     if not house_id:
@@ -560,12 +620,11 @@ def handle_add_device(client, server, data):
     """Process request to add a new device"""
     client_id = client['id']
     
-    with clients_lock:
-        if client_id not in clients or not clients[client_id].get('authenticated'):
-            send_error(client, server, "Not authenticated")
-            return
-        
-        client_data = clients[client_id]
+    # Get client data from shared state
+    client_data = state.get_client(client_id)
+    if not client_data or not client_data.get('authenticated'):
+        send_error(client, server, "Not authenticated")
+        return
     
     house_id = client_data.get('house_id')
     if not house_id:
@@ -614,12 +673,11 @@ def handle_remove_room(client, server, data):
     """Process request to remove a room"""
     client_id = client['id']
     
-    with clients_lock:
-        if client_id not in clients or not clients[client_id].get('authenticated'):
-            send_error(client, server, "Not authenticated")
-            return
-        
-        client_data = clients[client_id]
+    # Get client data from shared state
+    client_data = state.get_client(client_id)
+    if not client_data or not client_data.get('authenticated'):
+        send_error(client, server, "Not authenticated")
+        return
     
     house_id = client_data.get('house_id')
     if not house_id:
@@ -665,16 +723,16 @@ def handle_remove_room(client, server, data):
     finally:
         session.close()
 
+
 def handle_remove_device(client, server, data):
     """Process request to remove a device"""
     client_id = client['id']
     
-    with clients_lock:
-        if client_id not in clients or not clients[client_id].get('authenticated'):
-            send_error(client, server, "Not authenticated")
-            return
-        
-        client_data = clients[client_id]
+    # Get client data from shared state
+    client_data = state.get_client(client_id)
+    if not client_data or not client_data.get('authenticated'):
+        send_error(client, server, "Not authenticated")
+        return
     
     house_id = client_data.get('house_id')
     if not house_id:
@@ -726,11 +784,11 @@ def handle_remove_device(client, server, data):
 def handle_list_room_devices_message(client, server, data):
     client_id = client['id']
     
-    with clients_lock:
-        if client_id not in clients or not clients[client_id].get('authenticated'):
-            send_error(client, server, "Not authenticated")
-            return
-        client_data = clients[client_id]
+    # Get client data from shared state
+    client_data = state.get_client(client_id)
+    if not client_data or not client_data.get('authenticated'):
+        send_error(client, server, "Not authenticated")
+        return
     
     house_id = client_data.get('house_id')
     if not house_id:
@@ -744,7 +802,7 @@ def handle_list_room_devices_message(client, server, data):
     
     try:
         from model.domain import User
-        from server.handlers import active_houses, handle_list_room_devices
+        from server.handlers import handle_list_room_devices
         
         user = User(
             user_id=client_data['user_id'],
@@ -752,7 +810,8 @@ def handle_list_room_devices_message(client, server, data):
             role=client_data['role']
         )
         
-        house = active_houses.get(house_id)
+        # Get house from shared state
+        house = state.get_house(house_id)
         if not house:
             send_error(client, server, "House data not loaded")
             return
@@ -767,11 +826,11 @@ def handle_list_room_devices_message(client, server, data):
 def handle_list_group_devices_message(client, server, data):
     client_id = client['id']
     
-    with clients_lock:
-        if client_id not in clients or not clients[client_id].get('authenticated'):
-            send_error(client, server, "Not authenticated")
-            return
-        client_data = clients[client_id]
+    # Get client data from shared state
+    client_data = state.get_client(client_id)
+    if not client_data or not client_data.get('authenticated'):
+        send_error(client, server, "Not authenticated")
+        return
     
     house_id = client_data.get('house_id')
     if not house_id:
@@ -785,7 +844,7 @@ def handle_list_group_devices_message(client, server, data):
     
     try:
         from model.domain import User
-        from server.handlers import active_houses, handle_list_group_devices
+        from server.handlers import handle_list_group_devices
         
         user = User(
             user_id=client_data['user_id'],
@@ -793,7 +852,8 @@ def handle_list_group_devices_message(client, server, data):
             role=client_data['role']
         )
         
-        house = active_houses.get(house_id)
+        # Get house from shared state
+        house = state.get_house(house_id)
         if not house:
             send_error(client, server, "House data not loaded")
             return
@@ -855,7 +915,7 @@ def message_received(client, server, message):
     except Exception as e:
         logger.error(f"Error processing message: {str(e)}")
         send_error(client, server, "Internal server error")
-    
+
 def send_error(client, server, message):
     """Send error response to client"""
     response = {
@@ -874,9 +934,12 @@ def start_server():
     server.set_fn_client_left(client_left)
     server.set_fn_message_received(message_received)
     
-    # Initialize the broadcaster with references to server and clients
+    # Initialize the broadcaster with reference to server
     from server.broadcast import init_broadcaster
-    init_broadcaster(server, clients, clients_lock)
+    init_broadcaster(server)
+    
+    # Setup signal handlers for graceful shutdown
+    setup_signal_handlers(server)
     
     logger.info(f"Starting WebSocket server on {HOST}:{PORT}")
     server.run_forever()

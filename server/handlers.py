@@ -9,13 +9,10 @@ from model.bridge import update_orm_lamp_from_domain, update_orm_lock_from_domai
 from model.bridge import update_orm_ceiling_light_from_domain, update_orm_alarm_from_domain
 from server.broadcast import register_client, unregister_client, broadcast_to_house
 from model.domain import User, SmartHouse, Room, Lamp, Lock, Blinds, CeilingLight, Alarm
-
+from server.shared_state import state
 
 # Configure logging
 logger = logging.getLogger("Handlers")
-
-# Dictionary to store active houses in memory
-active_houses = {}
 
 # Define a mapping of device types to their ORM classes and update functions
 DEVICE_MAPPINGS = {
@@ -41,13 +38,32 @@ DEVICE_MAPPINGS = {
     }
 }
 
+def is_alarm_triggered(house):
+    """Check if the house alarm is triggered"""
+    return house.alarm and house.alarm.is_alarm and house.alarm.is_armed
+
+def notify_alarm_triggered(house_id):
+    """Broadcast an alarm notification to all clients in the house"""
+    broadcast_message = {
+        "type": "alarm_triggered",
+        "house_id": house_id,
+        "message": "SECURITY ALERT: House alarm has been triggered! Only administrators can perform actions."
+    }
+    broadcast_to_house(house_id, broadcast_message)
+    logger.warning(f"Alarm triggered in house {house_id}, notification broadcast to all clients")
+
 def get_device_from_house(house, room_id, device_id):
+    # Special case for the alarm (house-level device)
+    if room_id is None or room_id == "None":
+        if house.alarm and str(house.alarm.device_id) == str(device_id):
+            return house.alarm
+            
+    # Normal case for room devices
     room = house.rooms.get(room_id)
     if not room:
         return None
     return room.device_map.get(device_id)
         
-
 def handle_device_action(house, user, session, request_data, client_id=None):
     """
     Generic device action handler that routes to the appropriate method
@@ -60,6 +76,13 @@ def handle_device_action(house, user, session, request_data, client_id=None):
     device = get_device_from_house(house, room_id, device_id)
     device_type = type(device).__name__ if device else None
     
+    # ALARM CHECK - Only allow actions if alarm is not triggered or user is admin
+    if is_alarm_triggered(house) and not user.can_modify_structure():
+        return {
+            "status": "error", 
+            "message": "ALARM TRIGGERED: Only administrators can perform actions until the alarm is deactivated."
+        }
+
     # Authorization check
     if not user.can_control():
         return {"status": "error", "message": "User lacks permission to control devices"}
@@ -73,6 +96,11 @@ def handle_device_action(house, user, session, request_data, client_id=None):
     try:
         result = execute_device_action(device, action, params)
         
+        # IMPORTANT: Check alarm state again after the action (in case it triggered the alarm)
+        if is_alarm_triggered(house) and not user.can_modify_structure():
+            # Still perform the action but notify about alarm state
+            notify_alarm_triggered(house.house_id)
+            
         # Sync changes to the database
         mapping = DEVICE_MAPPINGS.get(device_type)
         if mapping:
@@ -118,7 +146,7 @@ def handle_device_action(house, user, session, request_data, client_id=None):
     except Exception as e:
         logger.error(f"Error executing device action: {str(e)}")
         return {"status": "error", "message": str(e)}
-
+    
 def handle_device_status(request_data, house, user):
     room_id = request_data.get("room_id")
     device_id = request_data.get("device_id")
@@ -136,6 +164,13 @@ def handle_device_status(request_data, house, user):
 
 def handle_device_group_status(request_data, house, user):
     """Handle request to check status of all devices of a specific type"""
+    # ALARM CHECK - Only allow actions if alarm is not triggered or user is admin
+    if is_alarm_triggered(house) and not user.can_modify_structure():
+        return {
+            "status": "error", 
+            "message": "ALARM TRIGGERED: Only administrators can perform actions until the alarm is deactivated."
+        }
+
     device_type = request_data.get("device_type")
     valid_types = ["Lamp", "Lock", "CeilingLight", "Blinds"]
     
@@ -351,8 +386,6 @@ def execute_device_action(device, action, params):
     if not method_name:
         raise ValueError(f"Unknown action: {action}")
     
-    # Note: Removed the special handling for on/off since we now have explicit methods
-    
     # Get the method from the device
     method = getattr(device, method_name, None)
     if not method:
@@ -366,7 +399,15 @@ def execute_device_action(device, action, params):
         elif action == "color":
             return method(params.get("color", "white"))
         elif action == "unlock":
-            return method(params.get("code", ""))
+            result = method(params.get("code", ""))
+            # Check if this failed unlock attempt triggered the alarm
+            if not result and hasattr(device, '_room'):  # result will be False for failed unlock
+                for room_id, room in device._room.items():
+                    if hasattr(room, 'house') and room.house and room.house.alarm:
+                        if room.house.alarm.is_alarm:
+                            from server.handlers import notify_alarm_triggered
+                            notify_alarm_triggered(room.house.house_id)
+            return result
         else:
             return method(**params)
     else:
@@ -374,27 +415,27 @@ def execute_device_action(device, action, params):
     
 def get_house_state(house):
     """Get the complete state of a house including all rooms and devices"""
-    state = {
+    state_data = {
         "house_id": house.house_id,
         "name": house.name,
         "rooms": {}
     }
     
     for room_id, room in house.rooms.items():
-        state["rooms"][room_id] = get_room_state(room)
+        state_data["rooms"][room_id] = get_room_state(room)
     
     if house.alarm:
-        state["alarm"] = {
+        state_data["alarm"] = {
             "device_id": house.alarm.device_id,
             "type": "Alarm",
             "status": house.alarm.check_status()
         }
     
-    return state
+    return state_data
 
 def get_room_state(room):
     """Get the state of a room including all devices using device_map"""
-    state = {
+    state_data = {
         "room_id": room.room_id,
         "name": room.name,
         "devices": {}
@@ -402,29 +443,38 @@ def get_room_state(room):
     
     # Use device_map to get all devices
     for device_id, device in room.device_map.items():
-        state["devices"][device_id] = {
+        state_data["devices"][device_id] = {
             "type": type(device).__name__,
             "status": device.check_status()
         }
     
-    return state
+    return state_data
 
 
 def handle_add_room(data, session, user):
-    if not user.can_modify_structure():
-        return {"status": "error", "message": "Permission denied."}
 
     house_id = data.get("house_id")
     name = data.get("room_name", "New Room")  # Default name if none provided
+    
+    # Update domain model if house is in memory
+    house = state.get_house(house_id)
+
+    # ALARM CHECK - Only allow actions if alarm is not triggered or user is admin
+    if is_alarm_triggered(house) and not user.can_modify_structure():
+        return {
+            "status": "error", 
+            "message": "ALARM TRIGGERED: Only administrators can perform actions until the alarm is deactivated."
+        }
+
+    if not user.can_modify_structure():
+        return {"status": "error", "message": "Permission denied."}
 
     # Create new room
     new_room = RoomORM(house_id=house_id, name=name)
     session.add(new_room)
     session.flush()  # This generates the primary key (id)
-    
-    # Update domain model if house is in memory
-    if house_id in active_houses:
-        house = active_houses[house_id]
+
+    if house:
         # Create a domain room object with the new room's ID
         from model.domain import Room
         room = Room(room_id=new_room.id, name=name)
@@ -443,6 +493,13 @@ def handle_add_room(data, session, user):
 
 def handle_add_device(data, session, user):
     """Handle adding a new device to a room with unique device ID"""
+    # ALARM CHECK - Only allow actions if alarm is not triggered or user is admin
+    if is_alarm_triggered(house) and not user.can_modify_structure():
+        return {
+            "status": "error", 
+            "message": "ALARM TRIGGERED: Only administrators can perform actions until the alarm is deactivated."
+        }
+
     if not user.can_modify_structure():
         return {"status": "error", "message": "Permission denied."}
 
@@ -459,8 +516,8 @@ def handle_add_device(data, session, user):
             "message": f"Invalid device type: '{device_type}'. Valid types are: {', '.join(valid_device_types)}"
         }
 
-    # Get the house from active houses
-    house = active_houses.get(house_id)
+    # Get the house from shared state
+    house = state.get_house(house_id)
     if not house:
         return {"status": "error", "message": "House not found in memory"}
     
@@ -542,6 +599,13 @@ def handle_add_device(data, session, user):
 
 def handle_remove_device(data, session, user):
     """Remove a device from a room"""
+    house = state.get_house(house_id)
+    # ALARM CHECK - Only allow actions if alarm is not triggered or user is admin
+    if is_alarm_triggered(house) and not user.can_modify_structure():
+        return {
+            "status": "error", 
+            "message": "ALARM TRIGGERED: Only administrators can perform actions until the alarm is deactivated."
+        }
     if not user.can_modify_structure():
         return {"status": "error", "message": "Permission denied."}
 
@@ -552,10 +616,11 @@ def handle_remove_device(data, session, user):
     if not all([house_id, room_id, device_id]):
         return {"status": "error", "message": "Missing required parameters."}
 
-    if house_id not in active_houses:
+    # Get house from shared state
+
+    if not house:
         return {"status": "error", "message": "House not active in memory."}
 
-    house = active_houses[house_id]
     domain_room = house.rooms.get(room_id)
 
     if not domain_room:
@@ -603,6 +668,13 @@ def handle_remove_device(data, session, user):
         return {"status": "error", "message": f"Failed to delete device: {str(e)}"}
 
 def handle_remove_room(data, session, user):
+    # ALARM CHECK - Only allow actions if alarm is not triggered or user is admin
+    house = state.get_house(house_id)
+    if is_alarm_triggered(house) and not user.can_modify_structure():
+        return {
+            "status": "error", 
+            "message": "ALARM TRIGGERED: Only administrators can perform actions until the alarm is deactivated."
+        }
     if not user.can_modify_structure():
         return {"status": "error", "message": "Permission denied."}
 
@@ -610,10 +682,9 @@ def handle_remove_room(data, session, user):
     room_id = data.get("room_id")
 
     # Check that the house is loaded in memory
-    if house_id not in active_houses:
+    
+    if not house:
         return {"status": "error", "message": "House not active in memory."}
-
-    house = active_houses[house_id]
 
     # Find room in DB
     room_orm = session.query(RoomORM).filter_by(house_id=house_id, id=room_id).first()
@@ -640,9 +711,13 @@ def handle_remove_room(data, session, user):
         session.rollback()
         return {"status": "error", "message": f"Failed to delete room: {str(e)}"}
 
-
-
 def handle_set_alarm_threshold(data, house, user):
+    # ALARM CHECK - Only allow actions if alarm is not triggered or user is admin
+    if is_alarm_triggered(house) and not user.can_modify_structure():
+        return {
+            "status": "error", 
+            "message": "ALARM TRIGGERED: Only administrators can perform actions until the alarm is deactivated."
+        }
     if not user.can_modify_structure():
         return {"status": "error", "message": "Permission denied"}
 
@@ -656,27 +731,6 @@ def handle_set_alarm_threshold(data, house, user):
     else:
         return {"status": "error", "message": "No alarm in house"}
 
-# This function is no longer needed since the WebSocket server handles connections
-# Keep it for reference until WebSocket implementation is complete
-"""
-def handle_client(client_socket, addr):
-    print(f"[HANDLER] Handling client from {addr}")
-    session = SessionLocal()
-    user = None
-    house = None
-
-    try:
-        # ... rest of the function ...
-    except Exception as e:
-        print(f"[ERROR] Handler failed for {addr}: {e}")
-    finally:
-        if house and house.house_id:
-            unregister_client(house.house_id, client_socket)
-        session.close()
-        client_socket.close()
-        print(f"[DISCONNECT] {addr} closed")
-"""
-
 def load_house_if_needed(house_id, session):
     """
     Load a house from the database if it's not already in memory.
@@ -688,16 +742,17 @@ def load_house_if_needed(house_id, session):
     Returns:
         house: The domain House object
     """
-    if house_id not in active_houses:
+    house = state.get_house(house_id)
+    if not house:
         house_row = session.query(House).get(house_id)
         if not house_row:
             raise ValueError(f"House {house_id} not found in database")
             
         house = domain_house_from_orm(house_row)
-        active_houses[house_id] = house
+        state.add_house(house_id, house)
         logger.info(f"Loaded house {house_id} into memory")
     
-    return active_houses[house_id]
+    return house
 
 def check_user_house_access(user_id, house_id, session):
     """

@@ -2,8 +2,17 @@ import websocket
 import json
 import sys
 
+import threading
+import queue
+
 HOST = 'localhost'
 PORT = 8765
+
+
+broadcast_queue = queue.Queue()
+response_queue = queue.Queue()
+last_command_id = 0  # Track command IDs
+command_lock = threading.Lock()  # Lock for thread-safe command ID increment
 
 # Terminal colors for better UI
 class Colors:
@@ -15,6 +24,52 @@ class Colors:
     ENDC = '\033[0m'
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
+
+def message_listener(ws):
+    while True:
+        try:
+            message = ws.recv()
+            data = json.loads(message)
+            
+            # Determine if this is a broadcast or a response
+            if "type" in data and data["type"] in ["room_added", "device_added", "room_removed", "device_removed",
+                                                  "lamp_update", "ceiling_light_update", "lock_update", 
+                                                  "blinds_update", "alarm_triggered",
+                                                  "lamp_group_update", "ceiling_light_group_update"]:
+                # This is a broadcast notification
+                broadcast_queue.put(data)
+                handle_broadcast_message(data)
+            else:
+                # This is a response to a command
+                response_queue.put(data)
+        except Exception as e:
+            print_error(f"Error in message listener: {e}")
+            break
+
+def handle_broadcast_message(data):
+    msg_type = data.get("type", "unknown")
+    print("\n" + "-" * 40)
+    print_info(f"BROADCAST NOTIFICATION: {msg_type}")
+    
+    if msg_type == "room_added":
+        print_info(f"New room '{data.get('room_name')}' (ID: {data.get('room_id')}) added to the house")
+    elif msg_type == "room_removed":
+        print_info(f"Room {data.get('room_id')} has been removed from the house")
+    elif msg_type == "device_added":
+        print_info(f"New {data.get('device_type')} (ID: {data.get('device_id')}) added to room {data.get('room_id')}")
+    elif msg_type == "device_removed":
+        print_info(f"Device {data.get('device_id')} removed from room {data.get('room_id')}")
+    elif msg_type == "alarm_triggered":
+        print_error(f"🚨 ALARM TRIGGERED: {data.get('message', 'Security alert!')}")
+    elif "_update" in msg_type:
+        device_type = msg_type.split("_")[0].capitalize()
+        print_info(f"{device_type} update: Device {data.get('device_id')} in room {data.get('room_id')}")
+        if "status" in data:
+            print_info(f"New status: {data.get('status')}")
+    
+    print("-" * 40)
+    # Print prompt again to indicate we're ready for input
+    print(f"\n{Colors.BOLD}> {Colors.ENDC}", end="", flush=True)
 
 def print_success(message):
     print(f"{Colors.GREEN}[SUCCESS] {message}{Colors.ENDC}")
@@ -29,167 +84,178 @@ def print_warning(message):
     print(f"{Colors.YELLOW}[WARNING] {message}{Colors.ENDC}")
 
 def send_and_print(ws, message):
+    # Clear response queue before sending to ensure we get the right response
+    while not response_queue.empty():
+        response_queue.get()
+        
     ws.send(json.dumps(message))
-    response = ws.recv()
     
+    # Wait for response with timeout
     try:
-        parsed_response = json.loads(response)
+        response = response_queue.get(timeout=5)  # 5 second timeout
         
-        # Handle error responses
-        if parsed_response.get("status") == "error":
-            print_error(parsed_response.get("message", "Unknown error"))
-            return parsed_response
-        
-        # Handle house state responses
-        if parsed_response.get("type") == "house_state":
-            print_info(f"House ID: {parsed_response.get('house_id')} - {parsed_response.get('name', 'Unnamed')}")
+        try:
+            parsed_response = response if isinstance(response, dict) else json.loads(response)
             
-            # Print rooms
-            rooms = parsed_response.get("state", {}).get("rooms", {})
-            print_info(f"Rooms ({len(rooms)}):")
-            for room_id, room_data in rooms.items():
-                print(f"  Room {room_id}: {room_data.get('name')} - {len(room_data.get('devices', {}))} devices")
+            # Handle error responses
+            if parsed_response.get("status") == "error":
+                print_error(parsed_response.get("message", "Unknown error"))
+                return parsed_response
             
-            # Print alarm if present
-            if "alarm" in parsed_response.get("state", {}):
-                alarm = parsed_response["state"]["alarm"]
-                is_armed = alarm["status"]["is_armed"]
-                is_triggered = alarm["status"]["is_alarm"]
-                print_info(f"Alarm: {'ARMED' if is_armed else 'Disarmed'}{' [TRIGGERED]' if is_triggered else ''}")
-            
-            return parsed_response
-        
-        # Handle room state responses
-        elif parsed_response.get("type") == "room_state":
-            room_id = parsed_response.get("room_id")
-            state = parsed_response.get("state", {})
-            
-            print_info(f"Room {room_id}: {state.get('name')}")
-            
-            # Print devices
-            devices = state.get("devices", {})
-            print_info(f"Devices ({len(devices)}):")
-            for device_id, device_data in devices.items():
-                device_type = device_data.get("type", "Unknown")
-                status = device_data.get("status", {})
+            # Handle house state responses
+            if parsed_response.get("type") == "house_state":
+                print_info(f"House ID: {parsed_response.get('house_id')} - {parsed_response.get('name', 'Unnamed')}")
                 
-                if device_type == "Lamp" or device_type == "CeilingLight":
-                    print(f"  {device_type} {device_id}: {'ON' if status.get('on') else 'OFF'}, " +
-                          f"Shade: {status.get('shade')}%, Color: {status.get('color')}")
-                elif device_type == "Lock":
-                    print(f"  Lock {device_id}: {'UNLOCKED' if status.get('is_unlocked') else 'LOCKED'}")
-                elif device_type == "Blinds":
-                    position = 'Up' if status.get('is_up') else 'Down'
-                    openness = 'Open' if status.get('is_open') else 'Closed'
-                    print(f"  Blinds {device_id}: {position}, {openness}")
-            
-            return parsed_response
-            
-        # Handle device status response
-        elif parsed_response.get("type") == "device_status":
-            device_id = parsed_response.get("device_id")
-            device_type = parsed_response.get("device_type")
-            status = parsed_response.get("status", {})
-            
-            print_info(f"Device {device_id} ({device_type}):")
-            
-            if device_type == "Lamp" or device_type == "CeilingLight":
-                print(f"  Status: {'ON' if status.get('on') else 'OFF'}")
-                print(f"  Brightness: {status.get('shade')}%")
-                print(f"  Color: {status.get('color')}")
-            elif device_type == "Lock":
-                print(f"  Status: {'UNLOCKED' if status.get('is_unlocked') else 'LOCKED'}")
-                print(f"  Failed Attempts: {status.get('failed_attempts', 0)}")
-            elif device_type == "Blinds":
-                print(f"  Position: {'Up' if status.get('is_up') else 'Down'}")
-                print(f"  State: {'Open' if status.get('is_open') else 'Closed'}")
-            elif device_type == "Alarm":
-                print(f"  Armed: {'Yes' if status.get('is_armed') else 'No'}")
-                print(f"  Triggered: {'Yes' if status.get('is_alarm') else 'No'}")
-                print(f"  Threshold: {status.get('threshold')}")
-            
-            return parsed_response
-            
-        # Handle device group status
-        elif parsed_response.get("type") == "device_group_status":
-            device_type = parsed_response.get("device_type")
-            devices = parsed_response.get("devices", {})
-            
-            print_info(f"{device_type} devices ({len(devices)}):")
-            
-            for device_id, device_data in devices.items():
-                room_id = device_data.get("room_id")
-                status = device_data.get("status", {})
+                # Print rooms
+                rooms = parsed_response.get("state", {}).get("rooms", {})
+                print_info(f"Rooms ({len(rooms)}):")
+                for room_id, room_data in rooms.items():
+                    print(f"  Room {room_id}: {room_data.get('name')} - {len(room_data.get('devices', {}))} devices")
                 
-                if device_type == "Lamp" or device_type == "CeilingLight":
-                    print(f"  {device_type} {device_id} (Room {room_id}): " +
-                          f"{'ON' if status.get('on') else 'OFF'}, " +
-                          f"Shade: {status.get('shade')}%, " + 
-                          f"Color: {status.get('color')}")
-                elif device_type == "Lock":
-                    print(f"  Lock {device_id} (Room {room_id}): " +
-                          f"{'UNLOCKED' if status.get('is_unlocked') else 'LOCKED'}")
-                elif device_type == "Blinds":
-                    position = 'Up' if status.get('is_up') else 'Down'
-                    openness = 'Open' if status.get('is_open') else 'Closed'
-                    print(f"  Blinds {device_id} (Room {room_id}): {position}, {openness}")
+                # Print alarm if present
+                if "alarm" in parsed_response.get("state", {}):
+                    alarm = parsed_response["state"]["alarm"]
+                    is_armed = alarm["status"]["is_armed"]
+                    is_triggered = alarm["status"]["is_alarm"]
+                    print_info(f"Alarm: {'ARMED' if is_armed else 'Disarmed'}{' [TRIGGERED]' if is_triggered else ''}")
+                
+                return parsed_response
             
-            return parsed_response
-            
-        # Handle device list responses
-        elif parsed_response.get("type") == "device_list":
-            scope = parsed_response.get("scope")
-            devices = parsed_response.get("devices", [])
-            
-            if scope == "house":
-                print_info(f"All devices in house ({len(devices)}):")
-                for device in devices:
-                    print(f"  {device.get('type')} {device.get('device_id')} - Room: {device.get('room_id', 'N/A')}")
-            
-            elif scope == "room":
+            # Handle room state responses
+            elif parsed_response.get("type") == "room_state":
                 room_id = parsed_response.get("room_id")
-                room_name = parsed_response.get("room_name")
-                print_info(f"Devices in Room {room_id} - {room_name} ({len(devices)}):")
-                for device in devices:
-                    print(f"  {device.get('type')} {device.get('device_id')}")
-            
-            elif scope == "group":
-                device_type = parsed_response.get("device_type")
-                print_info(f"{device_type} devices ({len(devices)}):")
-                for device in devices:
-                    print(f"  {device_type} {device.get('device_id')} - Room: {device.get('room_id', 'N/A')}")
-            
-            return parsed_response
-        
-        # Handle standard success messages
-        elif "status" in parsed_response and parsed_response["status"] == "success":
-            # Check if there's a specific message
-            if "message" in parsed_response:
-                print_success(parsed_response["message"])
-            else:
-                print_success("Command executed successfully")
+                state = parsed_response.get("state", {})
                 
-            # If there's additional state info, show it
-            if "device_state" in parsed_response:
-                device_type = parsed_response.get("device_type", "Device")
+                print_info(f"Room {room_id}: {state.get('name')}")
+                
+                # Print devices
+                devices = state.get("devices", {})
+                print_info(f"Devices ({len(devices)}):")
+                for device_id, device_data in devices.items():
+                    device_type = device_data.get("type", "Unknown")
+                    status = device_data.get("status", {})
+                    
+                    if device_type == "Lamp" or device_type == "CeilingLight":
+                        print(f"  {device_type} {device_id}: {'ON' if status.get('on') else 'OFF'}, " +
+                              f"Shade: {status.get('shade')}%, Color: {status.get('color')}")
+                    elif device_type == "Lock":
+                        print(f"  Lock {device_id}: {'UNLOCKED' if status.get('is_unlocked') else 'LOCKED'}")
+                    elif device_type == "Blinds":
+                        position = 'Up' if status.get('is_up') else 'Down'
+                        openness = 'Open' if status.get('is_open') else 'Closed'
+                        print(f"  Blinds {device_id}: {position}, {openness}")
+                
+                return parsed_response
+                
+            # Handle device status response
+            elif parsed_response.get("type") == "device_status":
                 device_id = parsed_response.get("device_id")
-                state = parsed_response["device_state"]
+                device_type = parsed_response.get("device_type")
+                status = parsed_response.get("status", {})
                 
-                print_info(f"{device_type} {device_id} state:")
-                for key, value in state.items():
-                    if key != "device_id":  # Skip redundant info
-                        print(f"  {key}: {value}")
+                print_info(f"Device {device_id} ({device_type}):")
+                
+                if device_type == "Lamp" or device_type == "CeilingLight":
+                    print(f"  Status: {'ON' if status.get('on') else 'OFF'}")
+                    print(f"  Brightness: {status.get('shade')}%")
+                    print(f"  Color: {status.get('color')}")
+                elif device_type == "Lock":
+                    print(f"  Status: {'UNLOCKED' if status.get('is_unlocked') else 'LOCKED'}")
+                    print(f"  Failed Attempts: {status.get('failed_attempts', 0)}")
+                elif device_type == "Blinds":
+                    print(f"  Position: {'Up' if status.get('is_up') else 'Down'}")
+                    print(f"  State: {'Open' if status.get('is_open') else 'Closed'}")
+                elif device_type == "Alarm":
+                    print(f"  Armed: {'Yes' if status.get('is_armed') else 'No'}")
+                    print(f"  Triggered: {'Yes' if status.get('is_alarm') else 'No'}")
+                    print(f"  Threshold: {status.get('threshold')}")
+                
+                return parsed_response
+                
+            # Handle device group status
+            elif parsed_response.get("type") == "device_group_status":
+                device_type = parsed_response.get("device_type")
+                devices = parsed_response.get("devices", {})
+                
+                print_info(f"{device_type} devices ({len(devices)}):")
+                
+                for device_id, device_data in devices.items():
+                    room_id = device_data.get("room_id")
+                    status = device_data.get("status", {})
+                    
+                    if device_type == "Lamp" or device_type == "CeilingLight":
+                        print(f"  {device_type} {device_id} (Room {room_id}): " +
+                              f"{'ON' if status.get('on') else 'OFF'}, " +
+                              f"Shade: {status.get('shade')}%, " + 
+                              f"Color: {status.get('color')}")
+                    elif device_type == "Lock":
+                        print(f"  Lock {device_id} (Room {room_id}): " +
+                              f"{'UNLOCKED' if status.get('is_unlocked') else 'LOCKED'}")
+                    elif device_type == "Blinds":
+                        position = 'Up' if status.get('is_up') else 'Down'
+                        openness = 'Open' if status.get('is_open') else 'Closed'
+                        print(f"  Blinds {device_id} (Room {room_id}): {position}, {openness}")
+                
+                return parsed_response
+                
+            # Handle device list responses
+            elif parsed_response.get("type") == "device_list":
+                scope = parsed_response.get("scope")
+                devices = parsed_response.get("devices", [])
+                
+                if scope == "house":
+                    print_info(f"All devices in house ({len(devices)}):")
+                    for device in devices:
+                        print(f"  {device.get('type')} {device.get('device_id')} - Room: {device.get('room_id', 'N/A')}")
+                
+                elif scope == "room":
+                    room_id = parsed_response.get("room_id")
+                    room_name = parsed_response.get("room_name")
+                    print_info(f"Devices in Room {room_id} - {room_name} ({len(devices)}):")
+                    for device in devices:
+                        print(f"  {device.get('type')} {device.get('device_id')}")
+                
+                elif scope == "group":
+                    device_type = parsed_response.get("device_type")
+                    print_info(f"{device_type} devices ({len(devices)}):")
+                    for device in devices:
+                        print(f"  {device_type} {device.get('device_id')} - Room: {device.get('room_id', 'N/A')}")
+                
+                return parsed_response
             
-            return parsed_response
-        
-        # Default case: just print the raw response
-        else:
+            # Handle standard success messages
+            elif "status" in parsed_response and parsed_response["status"] == "success":
+                # Check if there's a specific message
+                if "message" in parsed_response:
+                    print_success(parsed_response["message"])
+                else:
+                    print_success("Command executed successfully")
+                    
+                # If there's additional state info, show it
+                if "device_state" in parsed_response:
+                    device_type = parsed_response.get("device_type", "Device")
+                    device_id = parsed_response.get("device_id")
+                    state = parsed_response["device_state"]
+                    
+                    print_info(f"{device_type} {device_id} state:")
+                    for key, value in state.items():
+                        if key != "device_id":  # Skip redundant info
+                            print(f"  {key}: {value}")
+                
+                return parsed_response
+            
+            # Default case: just print the raw response
+            else:
+                print(f"[RECEIVED] {response}")
+                return parsed_response
+            
+        except json.JSONDecodeError:
             print(f"[RECEIVED] {response}")
-            return parsed_response
-        
-    except json.JSONDecodeError:
-        print(f"[RECEIVED] {response}")
-        return {"status": "error", "message": "Invalid response format"}
+            return {"status": "error", "message": "Invalid response format"}
+            
+    except queue.Empty:
+        print_error("Timeout waiting for server response")
+        return {"status": "error", "message": "No response received from server"}
     
 def login(ws):
     print_info("Please log in to the Smart Home System")
@@ -293,6 +359,7 @@ def show_menu(role):
 {Colors.BOLD}CONTROL COMMANDS (Regular and Admin only):{Colors.ENDC}
   action <action> <room_id> <device_id> [<param>=<value>] → Act on device
   group_action <device_type> <action> [<param>=<value>] → Act on all devices of type
+  alarm <action> [alarm_id] → Control house alarm (arm, disarm, trigger, stop)
 """
 
     # Admin menu items
@@ -346,6 +413,8 @@ def get_detailed_help(role):
 {Colors.BOLD}CONTROL COMMANDS (Regular and Admin only):{Colors.ENDC}
   action <action> <room_id> <device_id> [<param>=<value>] → Act on device
   group_action <device_type> <action> [<param>=<value>] → Act on all devices of type
+  alarm <action> [alarm_id] → Control house alarm (arm, disarm, trigger, stop)
+                            If alarm_id is omitted, finds the house alarm automatically
 """
 
     # Admin commands
@@ -421,6 +490,9 @@ def get_detailed_help(role):
   action open 1 3
   group_status Lamp
   group_action Lamp off
+  alarm arm        # Arms the house alarm
+  alarm disarm     # Disarms the house alarm
+  alarm trigger    # Manually triggers the alarm
 """
 
     # Admin examples
@@ -457,7 +529,6 @@ def get_detailed_help(role):
         help_text += admin_examples
     
     return help_text
-
 
 def command_loop(ws, house_id, role):
     # Show the appropriate menu based on user role
@@ -557,6 +628,84 @@ def command_loop(ws, house_id, role):
                     send_and_print(ws, action_cmd)
                 except ValueError:
                     print_error("Room ID and Device ID must be numbers")
+            elif cmd == "alarm" and len(parts) >= 2:
+                # Check permission for device control
+                if role == "guest":
+                    print_error("Permission denied: This action requires 'regular' or 'admin' role")
+                    continue
+                
+                try:
+                    action = parts[1]  # arm, disarm, trigger, or stop
+                    
+                    # Validate alarm action
+                    valid_actions = ["arm", "disarm", "trigger", "stop"]
+                    if action not in valid_actions:
+                        print_error(f"Invalid alarm action. Use: {', '.join(valid_actions)}")
+                        continue
+                    
+                    # Get alarm device ID - if provided use it, otherwise find it
+                    alarm_id = None
+                    if len(parts) > 2:
+                        try:
+                            alarm_id = int(parts[2])
+                        except ValueError:
+                            print_error("Alarm ID must be a number")
+                            continue
+                    else:
+                        # Send request to get alarm info
+                        result = send_and_print(ws, {
+                            "command": "list_group_devices",
+                            "house_id": house_id,
+                            "device_type": "Alarm"
+                        })
+                        
+                        # Extract alarm ID from response
+                        if result.get("status") != "error" and "devices" in result:
+                            if len(result["devices"]) > 0:
+                                alarm_id = result["devices"][0].get("device_id")
+                                print_info(f"Using alarm device ID: {alarm_id}")
+                            else:
+                                print_error("No alarm found in this house")
+                                continue
+                        else:
+                            print_error("Failed to retrieve alarm information")
+                            continue
+                    
+                    # Now create and send the special JSON format for house-level devices
+                    action_cmd = {
+                        "command": "device_action",
+                        "house_id": house_id,
+                        "device_id": alarm_id,
+                        "action": action
+                    }
+
+                    # Convert to string and send
+                    raw_json = json.dumps(action_cmd)
+                    print_info(f"Sending command: {raw_json}")
+                    ws.send(raw_json)
+
+                    # Wait for response with timeout
+                    try:
+                        response = response_queue.get(timeout=5)
+                        parsed_response = response if isinstance(response, dict) else json.loads(response)
+                        
+                        if parsed_response.get("status") == "success":
+                            print_success(f"Alarm {action} command successful")
+                            # Display alarm state if available
+                            if "device_state" in parsed_response:
+                                device_state = parsed_response["device_state"]
+                                print_info(f"Alarm state:")
+                                for key, value in device_state.items():
+                                    if key != "device_id":
+                                        print(f"  {key}: {value}")
+                        else:
+                            print_error(f"Error: {parsed_response.get('message', 'Unknown error')}")
+                    except queue.Empty:
+                        print_error("Timeout waiting for server response")
+
+
+                except Exception as e:
+                    print_error(f"Error processing alarm command: {str(e)}")
             elif cmd == "group_action" and len(parts) >= 3:
                 # Check permission for device control
                 if role == "guest":
@@ -665,6 +814,22 @@ def command_loop(ws, house_id, role):
                     })
                 except ValueError:
                     print_error("Room ID and Device ID must be numbers")
+            elif cmd == "del_device" and len(parts) == 3:
+                # Check permission for admin actions
+                if role != "admin":
+                    print_error("Permission denied: This action requires 'admin' role")
+                    continue
+                
+                try:
+                    room_id = int(parts[1])
+                    device_id = int(parts[2])
+                    send_and_print(ws, {
+                        "command": "remove_device",
+                        "room_id": room_id,
+                        "device_id": device_id
+                    })
+                except ValueError:
+                    print_error("Room ID and Device ID must be numbers")
             elif cmd == "raw":
                 raw = input("Enter raw JSON: ")
                 ws.send(raw)
@@ -680,7 +845,12 @@ def main():
         print_info(f"Connecting to server at {HOST}:{PORT}...")
         ws = websocket.create_connection(f"ws://{HOST}:{PORT}")
         print_success("Connected to server")
-
+        
+        # Start message listener thread
+        listener = threading.Thread(target=message_listener, args=(ws,), daemon=True)
+        listener.start()
+        
+        # Continue with login and command loop
         login_response = login(ws)
         house_id, role = join_house(ws, login_response.get("houses", []))
         command_loop(ws, house_id, role)
