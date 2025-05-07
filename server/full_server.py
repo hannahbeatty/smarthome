@@ -239,7 +239,8 @@ def handle_device_action_message(client, server, data):
     session = SessionLocal()
     try:
         from model.domain import User
-        from server.handlers import active_houses, handle_device_action
+        from server.handlers import active_houses
+        from server.handlers import handle_device_action
         
         # Create domain user with role
         user = User(
@@ -254,7 +255,8 @@ def handle_device_action_message(client, server, data):
             send_error(client, server, "House data not loaded")
             return
         
-        result = handle_device_action(house, user, session, data)
+        # Pass the client ID to the handler
+        result = handle_device_action(house, user, session, data, client_id=client_id)
         server.send_message(client, json.dumps(result))
         
     except Exception as e:
@@ -262,6 +264,42 @@ def handle_device_action_message(client, server, data):
         send_error(client, server, f"Error: {str(e)}")
     finally:
         session.close()
+
+def handle_device_status_message(client, server, data):
+    client_id = client['id']
+
+    with clients_lock:
+        if client_id not in clients or not clients[client_id].get('authenticated'):
+            send_error(client, server, "Not authenticated")
+            return
+        client_data = clients[client_id]
+
+    house_id = client_data.get('house_id')
+    if not house_id:
+        send_error(client, server, "Not currently in a house")
+        return
+
+    try:
+        from model.domain import User
+        from server.handlers import active_houses, handle_device_status
+
+        user = User(
+            user_id=client_data['user_id'],
+            username=client_data['username'],
+            role=client_data['role']
+        )
+
+        house = active_houses.get(house_id)
+        if not house:
+            send_error(client, server, "House data not loaded")
+            return
+
+        result = handle_device_status(data, house, user)
+        server.send_message(client, json.dumps(result))
+
+    except Exception as e:
+        logger.error(f"Error handling device status: {str(e)}")
+        send_error(client, server, f"Error: {str(e)}")
 
 def handle_query_house(client, server, data):
     """Process request to query entire house state"""
@@ -301,6 +339,8 @@ def handle_query_house(client, server, data):
     except Exception as e:
         logger.error(f"Error querying house: {str(e)}")
         send_error(client, server, f"Error: {str(e)}")
+
+
 
 def handle_query_room(client, server, data):
     """Process request to query a room's state"""
@@ -351,6 +391,200 @@ def handle_query_room(client, server, data):
         logger.error(f"Error querying room: {str(e)}")
         send_error(client, server, f"Error: {str(e)}")
 
+def handle_device_group_status_message(client, server, data):
+    client_id = client['id']
+    
+    with clients_lock:
+        if client_id not in clients or not clients[client_id].get('authenticated'):
+            send_error(client, server, "Not authenticated")
+            return
+        client_data = clients[client_id]
+    
+    house_id = client_data.get('house_id')
+    if not house_id:
+        send_error(client, server, "Not currently in a house")
+        return
+    
+    try:
+        from model.domain import User
+        from server.handlers import active_houses, handle_device_group_status
+        
+        user = User(
+            user_id=client_data['user_id'],
+            username=client_data['username'],
+            role=client_data['role']
+        )
+        
+        house = active_houses.get(house_id)
+        if not house:
+            send_error(client, server, "House data not loaded")
+            return
+        
+        result = handle_device_group_status(data, house, user)
+        server.send_message(client, json.dumps(result))
+        
+    except Exception as e:
+        logger.error(f"Error handling device group status: {str(e)}")
+        send_error(client, server, f"Error: {str(e)}")
+
+def handle_device_group_action_message(client, server, data):
+    client_id = client['id']
+    
+    with clients_lock:
+        if client_id not in clients or not clients[client_id].get('authenticated'):
+            send_error(client, server, "Not authenticated")
+            return
+        
+        client_data = clients[client_id]
+    
+    house_id = client_data.get('house_id')
+    if not house_id:
+        send_error(client, server, "Not currently in a house")
+        return
+    
+    session = SessionLocal()
+    try:
+        from model.domain import User
+        from server.handlers import active_houses, handle_device_group_action
+        
+        user = User(
+            user_id=client_data['user_id'],
+            username=client_data['username'],
+            role=client_data['role']
+        )
+        
+        house = active_houses.get(house_id)
+        if not house:
+            send_error(client, server, "House data not loaded")
+            return
+        
+        result = handle_device_group_action(house, user, session, data)
+        server.send_message(client, json.dumps(result))
+        
+    except Exception as e:
+        logger.error(f"Error handling device group action: {str(e)}")
+        send_error(client, server, f"Error: {str(e)}")
+    finally:
+        session.close()
+
+def handle_list_house_devices_message(client, server, data):
+    client_id = client['id']
+    
+    with clients_lock:
+        if client_id not in clients or not clients[client_id].get('authenticated'):
+            send_error(client, server, "Not authenticated")
+            return
+        client_data = clients[client_id]
+    
+    house_id = client_data.get('house_id')
+    if not house_id:
+        send_error(client, server, "Not currently in a house")
+        return
+    
+    try:
+        from model.domain import User
+        from server.handlers import active_houses, handle_list_house_devices
+        
+        user = User(
+            user_id=client_data['user_id'],
+            username=client_data['username'],
+            role=client_data['role']
+        )
+        
+        house = active_houses.get(house_id)
+        if not house:
+            send_error(client, server, "House data not loaded")
+            return
+        
+        result = handle_list_house_devices(house, user)
+        server.send_message(client, json.dumps(result))
+        
+    except Exception as e:
+        logger.error(f"Error listing house devices: {str(e)}")
+        send_error(client, server, f"Error: {str(e)}")
+
+def handle_list_room_devices_message(client, server, data):
+    client_id = client['id']
+    
+    with clients_lock:
+        if client_id not in clients or not clients[client_id].get('authenticated'):
+            send_error(client, server, "Not authenticated")
+            return
+        client_data = clients[client_id]
+    
+    house_id = client_data.get('house_id')
+    if not house_id:
+        send_error(client, server, "Not currently in a house")
+        return
+    
+    room_id = data.get('room_id')
+    if not room_id:
+        send_error(client, server, "Room ID is required")
+        return
+    
+    try:
+        from model.domain import User
+        from server.handlers import active_houses, handle_list_room_devices
+        
+        user = User(
+            user_id=client_data['user_id'],
+            username=client_data['username'],
+            role=client_data['role']
+        )
+        
+        house = active_houses.get(house_id)
+        if not house:
+            send_error(client, server, "House data not loaded")
+            return
+        
+        result = handle_list_room_devices(house, user, room_id)
+        server.send_message(client, json.dumps(result))
+        
+    except Exception as e:
+        logger.error(f"Error listing room devices: {str(e)}")
+        send_error(client, server, f"Error: {str(e)}")
+
+def handle_list_group_devices_message(client, server, data):
+    client_id = client['id']
+    
+    with clients_lock:
+        if client_id not in clients or not clients[client_id].get('authenticated'):
+            send_error(client, server, "Not authenticated")
+            return
+        client_data = clients[client_id]
+    
+    house_id = client_data.get('house_id')
+    if not house_id:
+        send_error(client, server, "Not currently in a house")
+        return
+    
+    device_type = data.get('device_type')
+    if not device_type:
+        send_error(client, server, "Device type is required")
+        return
+    
+    try:
+        from model.domain import User
+        from server.handlers import active_houses, handle_list_group_devices
+        
+        user = User(
+            user_id=client_data['user_id'],
+            username=client_data['username'],
+            role=client_data['role']
+        )
+        
+        house = active_houses.get(house_id)
+        if not house:
+            send_error(client, server, "House data not loaded")
+            return
+        
+        result = handle_list_group_devices(house, user, device_type)
+        server.send_message(client, json.dumps(result))
+        
+    except Exception as e:
+        logger.error(f"Error listing group devices: {str(e)}")
+        send_error(client, server, f"Error: {str(e)}")
+
 def message_received(client, server, message):
     """Process incoming messages from clients"""
     client_id = client['id']
@@ -368,10 +602,22 @@ def message_received(client, server, message):
             handle_logout(client, server, data)
         elif command == 'device_action':
             handle_device_action_message(client, server, data)
+        elif command == 'device_group_action':
+            handle_device_group_action_message(client, server, data)
         elif command == 'query_house':
             handle_query_house(client, server, data)
         elif command == 'query_room':
             handle_query_room(client, server, data)
+        elif command == 'device_status':
+            handle_device_status_message(client, server, data)
+        elif command == 'device_group_status':
+            handle_device_group_status_message(client, server, data)
+        elif command == 'list_house_devices':
+            handle_list_house_devices_message(client, server, data)
+        elif command == 'list_room_devices':
+            handle_list_room_devices_message(client, server, data)
+        elif command == 'list_group_devices':
+            handle_list_group_devices_message(client, server, data)
         else:
             send_error(client, server, f"Unknown command: {command}")
     
@@ -398,6 +644,10 @@ def start_server():
     server.set_fn_new_client(new_client)
     server.set_fn_client_left(client_left)
     server.set_fn_message_received(message_received)
+    
+    # Initialize the broadcaster with references to server and clients
+    from server.broadcast import init_broadcaster
+    init_broadcaster(server, clients, clients_lock)
     
     logger.info(f"Starting WebSocket server on {HOST}:{PORT}")
     server.run_forever()

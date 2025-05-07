@@ -41,31 +41,69 @@ def domain_ceiling_light_from_orm(cl_row):
     )
 
 def domain_room_from_orm(room_row):
+    print(f"Creating domain room: id={room_row.id}, name={room_row.name}")
     room = Room(room_id=room_row.id, name=room_row.name)
 
-    for lamp in room_row.lamps:
-        room.add_lamp(domain_lamp_from_orm(lamp))
-    for lock in room_row.locks:
-        room.add_lock(domain_lock_from_orm(lock))
+    print(f"Room {room_row.id} has {len(room_row.lamps)} lamps, {len(room_row.locks)} locks, "
+          f"ceiling_light={room_row.ceiling_light is not None}, "
+          f"blinds={room_row.blinds is not None}")
 
+    for lamp in room_row.lamps:
+        print(f"  Adding lamp {lamp.id}: on={lamp.on}, shade={lamp.shade}, color={lamp.color}")
+        room.add_lamp(domain_lamp_from_orm(lamp))
+    
+    for lock in room_row.locks:
+        print(f"  Adding lock {lock.id}: is_unlocked={lock.is_unlocked}, code={lock.code}")
+        room.add_lock(domain_lock_from_orm(lock))
+    
     if room_row.blinds:
+        print(f"  Adding blinds {room_row.blinds.id}: is_up={room_row.blinds.is_up}")
         room.add_blinds(domain_blinds_from_orm(room_row.blinds))
+    
     if room_row.ceiling_light:
+        print(f"  Adding ceiling_light {room_row.ceiling_light.id}: on={room_row.ceiling_light.on}")
         room.add_ceiling_light(domain_ceiling_light_from_orm(room_row.ceiling_light))
 
+    print("  Building device cache...")
+    room.build_device_cache()
+    print(f"  Device cache built with {len(room.device_map)} devices")
+    for device_id, device in room.device_map.items():
+        print(f"    Device {device_id}: type={type(device).__name__}")
+    
     return room
 
+
+
 def domain_alarm_from_orm(alarm_row):
-    alarm = Alarm(code=alarm_row.code)
+    alarm = Alarm(code=alarm_row.code, threshold=alarm_row.threshold if hasattr(alarm_row, "threshold") else 3)
     alarm.is_armed = alarm_row.is_armed
     alarm.is_alarm = alarm_row.is_alarm
+    alarm.device_id = alarm_row.id  
     return alarm
+
 
 def domain_house_from_orm(house_row):
     house = SmartHouse(house_id=house_row.id, name=house_row.name)
+    
+    # Set the next_device_id from the database
+    if hasattr(house_row, 'next_device_id'):
+        house.next_device_id = house_row.next_device_id
+    else:
+        # If not in database, calculate the next ID by finding the highest device ID + 1
+        max_id = 0
+        for room_row in house_row.rooms:
+            for device_collection in [room_row.lamps, room_row.locks]:
+                for device in device_collection:
+                    max_id = max(max_id, device.id)
+            if room_row.ceiling_light:
+                max_id = max(max_id, room_row.ceiling_light.id)
+            if room_row.blinds:
+                max_id = max(max_id, room_row.blinds.id)
+        house.next_device_id = max_id + 1
 
     for room_row in house_row.rooms:
         room = domain_room_from_orm(room_row)
+        room.build_device_cache()  # ✅ This populates room.device_map
         house.add_room(room)
 
     if house_row.alarm:
