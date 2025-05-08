@@ -78,7 +78,7 @@ logger = logging.getLogger('WebSocketServer')
 
 
 # Configuration
-HOST = '0.0.0.0'
+HOST = 'localhost'
 PORT = 12345
 
 def new_client(client, server):

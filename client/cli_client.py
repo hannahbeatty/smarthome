@@ -5,7 +5,7 @@ import sys
 import threading
 import queue
 
-HOST = '18.119.116.224'
+HOST = 'localhost'  # Server addy
 PORT = 12345
 
 

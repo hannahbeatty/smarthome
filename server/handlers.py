@@ -493,6 +493,16 @@ def handle_add_room(data, session, user):
 
 def handle_add_device(data, session, user):
     """Handle adding a new device to a room with unique device ID"""
+    house_id = data.get("house_id")
+    room_id = data.get("room_id")
+    device_type = data.get("device_type")
+    attrs = data.get("attributes", {})
+    
+    # Get the house from shared state
+    house = state.get_house(house_id)
+    if not house:
+        return {"status": "error", "message": "House not found in memory"}
+    
     # ALARM CHECK - Only allow actions if alarm is not triggered or user is admin
     if is_alarm_triggered(house) and not user.can_modify_structure():
         return {
@@ -503,11 +513,6 @@ def handle_add_device(data, session, user):
     if not user.can_modify_structure():
         return {"status": "error", "message": "Permission denied."}
 
-    house_id = data["house_id"]
-    room_id = data["room_id"]
-    device_type = data["device_type"]
-    attrs = data.get("attributes", {})
-
     # Validate device type
     valid_device_types = ["lamp", "lock", "blinds", "ceiling_light"]
     if device_type.lower() not in valid_device_types:
@@ -516,8 +521,7 @@ def handle_add_device(data, session, user):
             "message": f"Invalid device type: '{device_type}'. Valid types are: {', '.join(valid_device_types)}"
         }
 
-    # Get the house from shared state
-    house = state.get_house(house_id)
+
     if not house:
         return {"status": "error", "message": "House not found in memory"}
     
@@ -599,7 +603,13 @@ def handle_add_device(data, session, user):
 
 def handle_remove_device(data, session, user):
     """Remove a device from a room"""
+    house_id = data.get("house_id")
+    room_id = data.get("room_id")
+    device_id = data.get("device_id")
+    
+    # Get house from shared state
     house = state.get_house(house_id)
+    
     # ALARM CHECK - Only allow actions if alarm is not triggered or user is admin
     if is_alarm_triggered(house) and not user.can_modify_structure():
         return {
@@ -609,9 +619,8 @@ def handle_remove_device(data, session, user):
     if not user.can_modify_structure():
         return {"status": "error", "message": "Permission denied."}
 
-    house_id = data.get("house_id")
-    room_id = data.get("room_id")
-    device_id = data.get("device_id")
+    if not all([house_id, room_id, device_id]):
+        return {"status": "error", "message": "Missing required parameters."}
 
     if not all([house_id, room_id, device_id]):
         return {"status": "error", "message": "Missing required parameters."}
@@ -668,8 +677,13 @@ def handle_remove_device(data, session, user):
         return {"status": "error", "message": f"Failed to delete device: {str(e)}"}
 
 def handle_remove_room(data, session, user):
-    # ALARM CHECK - Only allow actions if alarm is not triggered or user is admin
+    house_id = data.get("house_id")
+    room_id = data.get("room_id")
+    
+    # Get house from shared state
     house = state.get_house(house_id)
+    
+    # ALARM CHECK - Only allow actions if alarm is not triggered or user is admin
     if is_alarm_triggered(house) and not user.can_modify_structure():
         return {
             "status": "error", 
@@ -678,11 +692,7 @@ def handle_remove_room(data, session, user):
     if not user.can_modify_structure():
         return {"status": "error", "message": "Permission denied."}
 
-    house_id = data.get("house_id")
-    room_id = data.get("room_id")
-
     # Check that the house is loaded in memory
-    
     if not house:
         return {"status": "error", "message": "House not active in memory."}
 
