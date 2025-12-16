@@ -1,3 +1,6 @@
+# terminal based websocket client
+
+
 import websocket
 import json
 import sys
@@ -25,6 +28,8 @@ class Colors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
 
+
+# listener thread
 def message_listener(ws):
     while True:
         try:
@@ -45,6 +50,7 @@ def message_listener(ws):
         except Exception as e:
             print_error(f"Error in message listener: {e}")
             break
+
 
 def handle_broadcast_message(data):
     msg_type = data.get("type", "unknown")
@@ -83,6 +89,8 @@ def print_info(message):
 def print_warning(message):
     print(f"{Colors.YELLOW}[WARNING] {message}{Colors.ENDC}")
 
+
+# request-response synchronization
 def send_and_print(ws, message):
     # Clear response queue before sending to ensure we get the right response
     while not response_queue.empty():
@@ -289,6 +297,8 @@ def join_house(ws, houses):
             print_error("Invalid input. Please enter a numeric ID.")
         print_error("Failed to join house. Try again.\n")
 
+
+# validation - if done again I would have this in a different section!
 def get_action_params(action, params_list):
     """
     Get and validate parameters based on action type

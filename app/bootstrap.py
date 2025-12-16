@@ -1,3 +1,5 @@
+# this file is for seeding a house for purposes of in-class demo
+
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -6,7 +8,7 @@ from db.setup import init_db, SessionLocal
 from model.db import Base, User, House, Room, Lamp, CeilingLight, Blinds, Lock, Alarm, HouseUserRole
 
 def seed():
-    """Create a rich demo environment with multiple users, houses, and devices."""
+    """Create a demo environment with multiple users, houses, and devices."""
     init_db()
     session = SessionLocal()
 
@@ -32,7 +34,6 @@ def seed():
         print("[SEED] Created 3 houses: Suburban Home, Beach House, and City Apartment")
 
         # SUBURBAN HOME SETUP
-        # ------------------------------
         # Create various rooms for the suburban house
         living_room = Room(name="Living Room", house_id=suburban_house.id, next_device_id=1)
         kitchen = Room(name="Kitchen", house_id=suburban_house.id, next_device_id=1)
@@ -75,7 +76,6 @@ def seed():
         print("[SEED] Added devices to Suburban Home")
 
         # BEACH HOUSE SETUP
-        # ------------------------------
         # Create rooms for beach house
         beach_living = Room(name="Living Area", house_id=beach_house.id, next_device_id=1)
         beach_kitchen = Room(name="Kitchen", house_id=beach_house.id, next_device_id=1)
@@ -114,7 +114,6 @@ def seed():
         print("[SEED] Added devices to Beach House")
 
         # APARTMENT SETUP
-        # ------------------------------
         # Create rooms for apartment
         apt_living = Room(name="Living Room", house_id=apartment.id, next_device_id=1)
         apt_bedroom = Room(name="Bedroom", house_id=apartment.id, next_device_id=1)
@@ -148,7 +147,6 @@ def seed():
         print("[SEED] Added devices to City Apartment")
 
         # ASSIGN USER ROLES TO DEMONSTRATE DIFFERENT ACCESS LEVELS
-        # -------------------------------------------------------
         # User1 has admin access to Suburban House, regular access to Beach House, and guest access to Apartment
         session.add(HouseUserRole(user_id=user1.id, house_id=suburban_house.id, role="admin"))
         session.add(HouseUserRole(user_id=user1.id, house_id=beach_house.id, role="regular"))
