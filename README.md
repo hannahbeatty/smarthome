@@ -22,14 +22,9 @@ This Smart Home Management System is a three-tier application that allows multip
 
 The system uses a three-tier architecture:
 
-### Client Tier
-Command-line interface using WebSocket communication.
-
-### Server Tier
-Multi-threaded WebSocket server with business logic.
-
-### Data Tier
-SQLAlchemy ORM with SQLite backend.
+- Client Tier: Command-line interface using WebSocket communication.
+- Server Tier: Multi-threaded WebSocket server with business logic.
+- Data Tier: SQLAlchemy ORM with SQLite backend.
 
 ---
 
