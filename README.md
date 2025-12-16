@@ -7,30 +7,14 @@ A comprehensive multi-user, multi-house IoT platform for home automation with ro
 This Smart Home Management System is a three-tier application that allows multiple users to control various devices across multiple houses based on their assigned permissions. The system features real-time synchronization, security integration, and persistent storage.
 
 ## Features
-
-### Multi-User Support
-Multiple users can connect simultaneously with isolated sessions.
-
-### Multi-House Management
-Control multiple homes from a single system.
-
-### Role-Based Access Control
-Three permission levels: admin, regular, guest.
-
-### Device Management
-Add, control, and remove smart devices.
-
-### Room Management
-Add and remove rooms with cascading device deletion.
-
-### Security Integration
-Lock and alarm system with automatic threat response.
-
-### Real-Time Updates
-WebSocket-based broadcasting of state changes.
-
-### Persistent Storage
-SQLite database with SQLAlchemy ORM.
+- Multiple users can connect simultaneously with isolated sessions.
+- Control multiple homes from a single system.
+- Three permission levels: admin, regular, guest.
+- Add, control, and remove smart devices.
+- Add and remove rooms with cascading device deletion.
+- Lock and alarm system with automatic threat response.
+- WebSocket-based broadcasting of state changes.
+- SQLite database with SQLAlchemy ORM.
 
 ---
 
@@ -50,21 +34,11 @@ SQLAlchemy ORM with SQLite backend.
 ---
 
 ## Device Types
-
-### Lamps
-On/off toggle, brightness adjustment, color change.
-
-### Ceiling Lights
-Same as lamps but unique per room.
-
-### Locks
-Lock/unlock with code validation and failed attempt tracking.
-
-### Blinds
-Position control (up/down) and shutter control (open/close).
-
-### Alarm
-House-level security system with arm/disarm and automatic triggering.
+- Lamps: On/off toggle, brightness adjustment, color change.
+- Ceiling Lights: Same as lamps but unique per room.
+- Locks: Lock/unlock with code validation and failed attempt tracking.
+- Blinds: Position control (up/down) and shutter control (open/close).
+- Alarm: House-level security system with arm/disarm and automatic triggering.
 
 ---
 
@@ -191,34 +165,6 @@ You can start multiple client instances to simulate multiple users.
 
 ---
 
-## Project Structure
-
-\`\`\`
-smart-home-system/
-├── app/
-│   ├── __init__.py
-│   ├── main.py
-│   └── config.py
-├── client/
-│   ├── cli_client.py
-│   └── utils.py
-├── db/
-│   ├── setup.py
-│   └── models/
-├── model/
-│   ├── domain.py
-│   ├── db.py
-│   └── bridge.py
-├── server/
-│   ├── full_server.py
-│   ├── handlers.py
-│   ├── broadcast.py
-│   └── shared_state.py
-├── bootstrap.py
-└── README.md
-\`\`\`
-
----
 
 ## Implementation Notes
 
@@ -227,26 +173,6 @@ smart-home-system/
 - WebSockets provide real-time updates across connected clients.
 - Alarm integrates failed unlock tracking with automatic triggering.
 - Thread-safe locks ensure consistent shared state.
-
----
-
-## Troubleshooting
-
-### Server won't start
-Check if the port is already in use.
-
-### Client connection error
-Ensure the server is running.
-
-### Database errors
-Reinitialize the database:
-
-\`\`\`bash
-python bootstrap.py
-\`\`\`
-
-### Permission errors
-Verify your user role supports the requested action.
 
 ---
 
